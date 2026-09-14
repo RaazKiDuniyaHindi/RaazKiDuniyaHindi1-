@@ -107,9 +107,9 @@ app.post(
           `Style: ${style}. ` +
           `No text, no subtitles, no logos. ` +
           `Visualize this narration: ${scenes[i]}`;
-
-        const task = await client.imageToVideo
-          .create({
+            
+         const task = await client.textToVideo  
+         .create({
             model: "gen4.5",
             promptText: prompt,
             ratio,
