@@ -1,19 +1,31 @@
-# Raz Ki Duniya — Complete AI Video Maker
+# Raz Ki Duniya — FIXED v2
 
-This is the next version covering the requested 7 points:
-1. Real AI visuals through Runway Gen-4.5
-2. Optional talking-character asset hook
-3. MP4 rendering
-4. Runway API server connection
-5. Automatic scene generation from Hindi script
-6. Voice input + optional music mix
-7. One-click workflow with 9:16 / 16:9 and download
+यह package उस समस्या को ठीक करता है जिसमें `AI scenes: 0%` पर UI अटका रहता था।
 
-## Important
-- This is a complete project, not a fake browser-only demo.
-- It needs a server/PC or hosting with Node.js and FFmpeg installed.
-- Put your secret in `.env` as `RUNWAYML_API_SECRET=...` and never expose it in the browser.
-- Runway charges credits for generation.
-- The talking-character portion is an integration hook; actual lip-synced character generation requires a supported Runway character/performance workflow and suitable character/driving assets.
+## क्या ठीक किया गया
+- Frontend अब सच में `POST /api/generate` को FormData के साथ call करता है।
+- Job ID मिलने के बाद frontend `/api/job/:id` को poll करता है।
+- Runway scene progress UI में दिखता है।
+- Error अब स्क्रीन पर साफ दिखाई देगा।
+- AI scenes ready होने के बाद `/api/render` call होता है।
+- FFmpeg के लिए `ffmpeg-static` जोड़ा गया है।
+- Runway Gen-4.5 text-to-video backend रखा गया है।
 
-Runway's current developer docs support Gen-4.5 text/image-to-video and a Character Performance API. See official docs.
+## Render पर सेटअप
+1. GitHub में इस ZIP की files upload करें और पुरानी project files replace करें।
+2. Render service में **Build Command**:
+   `npm install`
+3. **Start Command**:
+   `npm start`
+4. Environment में:
+   `RUNWAYML_API_SECRET` = आपकी existing secret value
+5. Deploy करें।
+6. Deploy के बाद:
+   `/api/status`
+   खोलकर `runwayConfigured: true` और `ffmpegConfigured: true` देखें।
+
+## जरूरी
+API key को ZIP/GitHub में मत डालना। Render Environment में ही रखना।
+
+## Runway
+यह package official Runway Node SDK और Gen-4.5 text-to-video flow का उपयोग करता है।

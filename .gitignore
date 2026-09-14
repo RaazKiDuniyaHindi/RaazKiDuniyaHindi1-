@@ -1,5 +1,6 @@
-.env
-.env.*
-!.env.example
 node_modules/
-*.zip
+.env
+uploads/*
+renders/*
+!uploads/.gitkeep
+!renders/.gitkeep
