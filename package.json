@@ -7,10 +7,10 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
-    "@runwayml/sdk": "^4.20.0",
+    "@gradio/client": "^2.0.0",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "fluent-ffmpeg": "^2.1.3",
