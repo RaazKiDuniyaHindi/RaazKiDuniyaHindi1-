@@ -15,7 +15,7 @@ fs.mkdirSync(path.join(root,'uploads'),{recursive:true});
 fs.mkdirSync(path.join(root,'renders'),{recursive:true});
 app.use(express.json({limit:'5mb'}));
 app.use(express.static(path.join(root,'public')));
-
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 const client = process.env.RUNWAYML_API_SECRET ? new RunwayML({apiKey:process.env.RUNWAYML_API_SECRET}) : null;
 const jobs=new Map();
 const splitScenes=(s)=>s.replace(/\s+/g,' ').trim().split(/(?<=[.!?।])\s+/).filter(Boolean).slice(0,20);
