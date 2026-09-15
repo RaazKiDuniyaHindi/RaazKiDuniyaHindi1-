@@ -483,8 +483,10 @@ app.post(
 );
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(root, 'public', 'index.html'));
+  res.sendFile(path.join(root, 'index.html'));
 });
+  
+
 
 app.use((error, req, res, next) => {
   console.error('SERVER ERROR:', error);
