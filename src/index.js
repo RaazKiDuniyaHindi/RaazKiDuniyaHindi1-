@@ -100,9 +100,15 @@ async(q,r)=>{
 
     const job=c.submit(e[0],vals);
 
-    const result=await job.result();
+let result=null;
 
-    const url=getVideo(result);
+for await (const msg of job) {
+  if (msg.type === 'data') {
+    result=msg.data;
+  }
+}
+
+const url=getVideo(result);
 
     if(!url){
       console.log('OMNI RESULT:',JSON.stringify(result).slice(0,3000));
