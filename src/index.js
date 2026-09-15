@@ -4,127 +4,96 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import RunwayML, { TaskFailedError } from '@runwayml/sdk';
 import ffmpeg from 'fluent-ffmpeg';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(__dirname, '..');
+const __dirname =
+  path.dirname(fileURLToPath(import.meta.url));
+
+const root =
+  path.join(__dirname, '..');
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
 
-const uploadsDir = path.join(root, 'uploads');
-const rendersDir = path.join(root, 'renders');
+const PORT =
+  Number(process.env.PORT || 3000);
 
-fs.mkdirSync(uploadsDir, { recursive: true });
-fs.mkdirSync(rendersDir, { recursive: true });
+const uploadsDir =
+  path.join(root, 'uploads');
 
-const upload = multer({ dest: uploadsDir });
+const rendersDir =
+  path.join(root, 'renders');
 
-app.use(express.json({ limit: '5mb' }));
-app.use(express.static(path.join(root, 'public')));
-app.use('/renders', express.static(rendersDir));
+fs.mkdirSync(
+  uploadsDir,
+  { recursive: true }
+);
 
-const apiKey = process.env.RUNWAYML_API_SECRET?.trim();
+fs.mkdirSync(
+  rendersDir,
+  { recursive: true }
+);
 
-const client = apiKey
-  ? new RunwayML({ apiKey })
-  : null;
+const upload =
+  multer({
+    dest: uploadsDir
+  });
 
-const jobs = new Map();
+app.use(
+  express.json({
+    limit: '5mb'
+  })
+);
+
+app.use(
+  express.static(
+    path.join(root, 'public')
+  )
+);
+
+app.use(
+  '/renders',
+  express.static(rendersDir)
+);
+
+const apiKey =
+  process.env.RUNWAYML_API_SECRET?.trim();
+
+const jobs =
+  new Map();
+
+const RUNWAY_BASE =
+  'https://api.dev.runwayml.com';
+
+const RUNWAY_VERSION =
+  '2024-11-06';
 
 function splitScenes(script) {
-  const clean = String(script || '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const clean =
+    String(script || '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-  if (!clean) return [];
-
-  const parts = clean
-    .split(/(?<=[.!?।])\s+/)
-    .filter(Boolean);
-
-  return (parts.length ? parts : [clean]).slice(0, 20);
-}
-
-function errorText(error) {
-  if (!error) return 'Unknown error';
-
-  const details =
-    error.taskDetails ||
-    error.error ||
-    error.response?.data;
-
-  if (details) {
-    if (typeof details === 'string') {
-      return details;
-    }
-
-    if (details.message) {
-      return details.message;
-    }
-
-    if (details.error) {
-      return typeof details.error === 'string'
-        ? details.error
-        : JSON.stringify(details.error);
-    }
-
-    if (Array.isArray(details.issues)) {
-      return details.issues
-        .map(x => x?.message || JSON.stringify(x))
-        .join('; ');
-    }
-
-    try {
-      return JSON.stringify(details);
-    } catch {}
+  if (!clean) {
+    return [];
   }
 
-  return error.message || String(error);
-}
+  const parts =
+    clean
+      .split(
+        /(?<=[.!?।])\s+/
+      )
+      .filter(Boolean);
 
-function friendlyRunwayError(error) {
-  const raw = errorText(error);
-  const lower = raw.toLowerCase();
-
-  if (
-    lower.includes('not have enough credits') ||
-    lower.includes('insufficient') ||
-    lower.includes('credit')
-  ) {
-    return 'Runway credits पर्याप्त नहीं हैं। Credits जोड़ने के बाद ही AI scene generate होगा।';
-  }
-
-  if (lower.includes('promptimage')) {
-    return 'Runway promptImage validation error मिला। Text-to-video में image field नहीं भेजी जानी चाहिए।';
-  }
-
-  if (lower.includes('validation of body')) {
-    return `Runway request validation failed: ${raw}`;
-  }
-
-  if (
-    lower.includes('401') ||
-    lower.includes('unauthorized')
-  ) {
-    return 'Runway API key गलत या expired है। RUNWAYML_API_SECRET जाँचें।';
-  }
-
-  if (
-    lower.includes('502') ||
-    lower.includes('bad gateway') ||
-    lower.includes('<!doctype') ||
-    lower.includes('<html')
-  ) {
-    return 'Runway job-status server ने अस्थायी HTTP 502 response दिया।';
-  }
-
-  return raw;
+  return (
+    parts.length
+      ? parts
+      : [clean]
+  ).slice(0, 20);
 }
 
 function setJob(id, patch) {
-  const old = jobs.get(id) || {};
+  const old =
+    jobs.get(id) || {};
 
   jobs.set(id, {
     ...old,
@@ -134,115 +103,282 @@ function setJob(id, patch) {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(
+    resolve => setTimeout(resolve, ms)
+  );
+}
+
+function errorText(error) {
+  if (!error) {
+    return 'Unknown error';
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error.message) {
+    return error.message;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function friendlyRunwayError(error) {
+  const raw =
+    errorText(error);
+
+  const lower =
+    raw.toLowerCase();
+
+  if (
+    lower.includes(
+      'not have enough credits'
+    ) ||
+    lower.includes(
+      'insufficient'
+    ) ||
+    lower.includes(
+      'credit'
+    )
+  ) {
+    return (
+      'Runway credits पर्याप्त नहीं हैं। ' +
+      'Credits जोड़ने के बाद ही AI scene generate होगा।'
+    );
+  }
+
+  if (
+    lower.includes('validation of body')
+  ) {
+    return (
+      'Runway request validation failed: ' +
+      raw
+    );
+  }
+
+  if (
+    lower.includes('401') ||
+    lower.includes('unauthorized')
+  ) {
+    return (
+      'Runway API key गलत या expired है। ' +
+      'RUNWAYML_API_SECRET जाँचें।'
+    );
+  }
+
+  if (
+    lower.includes('502') ||
+    lower.includes('bad gateway') ||
+    lower.includes('<html') ||
+    lower.includes('<!doctype')
+  ) {
+    return (
+      'Runway job-status server ने अस्थायी HTTP 502 response दिया।'
+    );
+  }
+
+  return raw;
 }
 
 /*
- * Runway task का manual status polling.
+ * Runway API से JSON response लेना.
  *
- * 502 / network / temporary errors पर retry होगा.
- * नया video task create नहीं होगा.
+ * HTML या empty response मिलने पर
+ * उसे JSON मानकर parse नहीं करेंगे.
  */
-async function waitForRunwayTask(taskId) {
-  const startedAt = Date.now();
+async function runwayRequest(
+  url,
+  options = {}
+) {
+  const response =
+    await fetch(
+      url,
+      {
+        ...options,
+        headers: {
+          Authorization:
+            `Bearer ${apiKey}`,
 
-  const timeoutMs =
-    12 * 60 * 1000;
+          'Content-Type':
+            'application/json',
 
-  let consecutiveErrors = 0;
+          'X-Runway-Version':
+            RUNWAY_VERSION,
 
-  while (Date.now() - startedAt < timeoutMs) {
+          ...(options.headers || {})
+        }
+      }
+    );
+
+  const text =
+    await response.text();
+
+  if (!response.ok) {
+    const error =
+      new Error(
+        `HTTP ${response.status} — ${text.slice(0, 1000)}`
+      );
+
+    error.status =
+      response.status;
+
+    error.responseText =
+      text;
+
+    throw error;
+  }
+
+  if (!text.trim()) {
+    throw new Error(
+      'Runway server ने empty response दिया।'
+    );
+  }
+
+  let data;
+
+  try {
+    data =
+      JSON.parse(text);
+  } catch {
+    const error =
+      new Error(
+        `Runway server ने JSON की जगह HTML/अन्य response भेजा। HTTP ${response.status} — ${text.slice(0, 500)}`
+      );
+
+    error.status =
+      response.status;
+
+    error.responseText =
+      text;
+
+    throw error;
+  }
+
+  return data;
+}
+
+/*
+ * नया text-to-video task.
+ *
+ * Official Runway endpoint:
+ * POST /v1/text_to_video
+ */
+async function createRunwayTask(
+  prompt,
+  ratio
+) {
+  const body = {
+    model: 'gen4.5',
+    promptText: prompt,
+    ratio,
+    duration: 5
+  };
+
+  console.log(
+    'Creating Runway text-to-video task...'
+  );
+
+  console.log(
+    'Runway request:',
+    JSON.stringify(body)
+  );
+
+  return await runwayRequest(
+    `${RUNWAY_BASE}/v1/text_to_video`,
+    {
+      method: 'POST',
+      body:
+        JSON.stringify(body)
+    }
+  );
+}
+
+/*
+ * Existing Runway task का status.
+ *
+ * 502 / 503 / 504 / network error पर
+ * उसी task को retry किया जाएगा.
+ *
+ * नया task नहीं बनाया जाएगा.
+ */
+async function getRunwayTask(
+  taskId
+) {
+  const maxAttempts = 8;
+
+  let attempt = 0;
+
+  while (attempt < maxAttempts) {
+    attempt++;
+
     try {
       const task =
-        await client.tasks.retrieve(taskId);
-
-      consecutiveErrors = 0;
-
-      const status =
-        String(task?.status || '').toUpperCase();
-
-      console.log(
-        `Runway task ${taskId} status: ${status}`
-      );
-
-      if (status === 'SUCCEEDED') {
-        return task;
-      }
-
-      if (
-        status === 'FAILED' ||
-        status === 'CANCELED'
-      ) {
-        const failed =
-          new Error(
-            task?.failure ||
-            task?.failureCode ||
-            `Runway task ${status}.`
-          );
-
-        failed.taskDetails = task;
-
-        throw failed;
-      }
-
-      /*
-       * Runway recommends polling at 5 seconds or more.
-       * थोड़ा jitter भी रखा गया है.
-       */
-      const jitter =
-        Math.floor(
-          Math.random() * 1500
+        await runwayRequest(
+          `${RUNWAY_BASE}/v1/tasks/${taskId}`,
+          {
+            method: 'GET',
+            headers: {
+              'Content-Type':
+                'application/json'
+            }
+          }
         );
 
-      await sleep(
-        5000 + jitter
-      );
+      return task;
 
     } catch (error) {
+      const status =
+        Number(error?.status || 0);
+
       const raw =
-        errorText(error).toLowerCase();
-
-      /*
-       * अगर task वास्तव में FAILED/CANCELED है,
-       * तो retry नहीं करना.
-       */
-      const taskFinished =
-        error?.taskDetails?.status === 'FAILED' ||
-        error?.taskDetails?.status === 'CANCELED';
-
-      if (taskFinished) {
-        throw error;
-      }
+        errorText(error)
+          .toLowerCase();
 
       const temporary =
-        raw.includes('502') ||
-        raw.includes('bad gateway') ||
-        raw.includes('503') ||
-        raw.includes('504') ||
-        raw.includes('gateway') ||
-        raw.includes('network') ||
-        raw.includes('timeout') ||
-        raw.includes('fetch failed') ||
-        raw.includes('<html') ||
-        raw.includes('<!doctype');
+        status === 502 ||
+        status === 503 ||
+        status === 504 ||
+        raw.includes(
+          'bad gateway'
+        ) ||
+        raw.includes(
+          'gateway'
+        ) ||
+        raw.includes(
+          'network'
+        ) ||
+        raw.includes(
+          'fetch failed'
+        ) ||
+        raw.includes(
+          'timeout'
+        ) ||
+        raw.includes(
+          '<html'
+        ) ||
+        raw.includes(
+          '<!doctype'
+        );
 
-      if (!temporary) {
+      if (
+        !temporary ||
+        attempt >= maxAttempts
+      ) {
         throw error;
       }
 
-      consecutiveErrors++;
-
-      /*
-       * Exponential backoff:
-       * 5s → 10s → 20s → 30s maximum
-       */
       const backoff =
         Math.min(
           30000,
           5000 *
             Math.pow(
               2,
-              consecutiveErrors - 1
+              attempt - 1
             )
         );
 
@@ -255,8 +391,7 @@ async function waitForRunwayTask(taskId) {
         backoff + jitter;
 
       console.warn(
-        `Runway status temporary error. Retry ${consecutiveErrors} in ${wait}ms:`,
-        errorText(error)
+        `Runway status ${status || 'temporary'} error. Retry ${attempt}/${maxAttempts} in ${wait}ms`
       );
 
       await sleep(wait);
@@ -264,28 +399,113 @@ async function waitForRunwayTask(taskId) {
   }
 
   throw new Error(
-    'Runway task polling timeout: task ने 12 मिनट में पूरा नहीं किया।'
+    'Runway task status check failed after retries.'
   );
 }
 
-app.get('/api/status', (req, res) => {
-  res.json({
-    ok: true,
-    runwayConfigured: Boolean(client),
-    ffmpeg: true
-  });
-});
+/*
+ * Task को पूरा होने तक poll करना.
+ */
+async function waitForRunwayTask(
+  taskId
+) {
+  const started =
+    Date.now();
+
+  const timeoutMs =
+    12 * 60 * 1000;
+
+  while (
+    Date.now() - started <
+    timeoutMs
+  ) {
+    const task =
+      await getRunwayTask(
+        taskId
+      );
+
+    const status =
+      String(
+        task?.status || ''
+      ).toUpperCase();
+
+    console.log(
+      `Runway task ${taskId}: ${status}`
+    );
+
+    if (
+      status === 'SUCCEEDED'
+    ) {
+      return task;
+    }
+
+    if (
+      status === 'FAILED' ||
+      status === 'CANCELED'
+    ) {
+      const error =
+        new Error(
+          task?.failure ||
+          task?.failureCode ||
+          `Runway task ${status}.`
+        );
+
+      error.taskDetails =
+        task;
+
+      throw error;
+    }
+
+    /*
+     * Runway recommends 5 seconds or more
+     * between status requests.
+     */
+    const jitter =
+      Math.floor(
+        Math.random() * 1500
+      );
+
+    await sleep(
+      5000 + jitter
+    );
+  }
+
+  throw new Error(
+    'Runway task polling timeout: 12 मिनट में task पूरा नहीं हुआ।'
+  );
+}
+
+app.get(
+  '/api/status',
+  (req, res) => {
+    res.json({
+      ok: true,
+      runwayConfigured:
+        Boolean(apiKey),
+      ffmpeg: true
+    });
+  }
+);
 
 app.post(
   '/api/generate',
   upload.fields([
-    { name: 'voice', maxCount: 1 },
-    { name: 'music', maxCount: 1 },
-    { name: 'characterImage', maxCount: 1 }
+    {
+      name: 'voice',
+      maxCount: 1
+    },
+    {
+      name: 'music',
+      maxCount: 1
+    },
+    {
+      name: 'characterImage',
+      maxCount: 1
+    }
   ]),
   async (req, res) => {
     try {
-      if (!client) {
+      if (!apiKey) {
         return res.status(400).json({
           ok: false,
           error:
@@ -299,20 +519,24 @@ app.post(
         ).trim();
 
       const format =
-        req.body?.format || '9:16';
+        req.body?.format ||
+        '9:16';
 
       const style =
         String(
-          req.body?.style || 'Mystery'
+          req.body?.style ||
+          'Mystery'
         ).trim();
 
       const characterMode =
-        req.body?.characterMode || 'off';
+        req.body?.characterMode ||
+        'off';
 
       if (!script) {
         return res.status(400).json({
           ok: false,
-          error: 'Script is required.'
+          error:
+            'Script is required.'
         });
       }
 
@@ -322,7 +546,8 @@ app.post(
       if (!scenes.length) {
         return res.status(400).json({
           ok: false,
-          error: 'No scenes found in script.'
+          error:
+            'No scenes found in script.'
         });
       }
 
@@ -332,18 +557,28 @@ app.post(
           .slice(2, 8)}`;
 
       setJob(id, {
-        status: 'generating',
-        progress: 1,
-        sceneCount: scenes.length,
-        completedScenes: 0,
+        status:
+          'generating',
+
+        progress:
+          1,
+
+        sceneCount:
+          scenes.length,
+
+        completedScenes:
+          0,
+
         scenes: [],
+
         characterMode
       });
 
       res.status(202).json({
         ok: true,
         jobId: id,
-        sceneCount: scenes.length
+        sceneCount:
+          scenes.length
       });
 
       void (async () => {
@@ -360,37 +595,56 @@ app.post(
             i < scenes.length;
             i++
           ) {
+            /*
+             * Scene start.
+             */
+            setJob(id, {
+              status:
+                'generating',
+
+              progress:
+                Math.max(
+                  2,
+                  5 +
+                    Math.round(
+                      (i /
+                        scenes.length) *
+                        85
+                    )
+                ),
+
+              completedScenes:
+                i,
+
+              sceneCount:
+                scenes.length,
+
+              scenes:
+                [...urls],
+
+              characterMode
+            });
+
             const prompt =
               `Cinematic Hindi mystery documentary scene. ` +
               `Style: ${style}. ` +
               `No text, no subtitles, no logos. ` +
-              `Visualize this narration naturally and realistically: ` +
+              `Realistic cinematic visuals, natural camera movement, ` +
+              `detailed environment and dramatic lighting. ` +
+              `Visualize this narration naturally: ` +
               `${scenes[i]}`;
 
             /*
-             * IMPORTANT:
-             *
-             * Gen-4.5 text-to-video
-             * uses imageToVideo.create()
-             * WITHOUT promptImage.
+             * Direct official text-to-video API.
              */
-            const taskRequest =
-              client.imageToVideo.create({
-                model: 'gen4.5',
-                promptText: prompt,
-                ratio,
-                duration: 5
-              });
-
-            /*
-             * पहले task ID प्राप्त करें.
-             * इसके बाद manual polling होगा.
-             */
-            const createdTask =
-              await taskRequest;
+            const created =
+              await createRunwayTask(
+                prompt,
+                ratio
+              );
 
             const taskId =
-              createdTask?.id;
+              created?.id;
 
             if (!taskId) {
               throw new Error(
@@ -399,33 +653,19 @@ app.post(
             }
 
             console.log(
-              `Runway scene ${i + 1}/${scenes.length} task: ${taskId}`
+              `Runway scene ${i + 1}/${scenes.length} task ID: ${taskId}`
             );
 
             /*
-             * Scene generation शुरू हो चुकी है.
-             * Progress 5% से आगे बढ़ेगी.
+             * अब उसी task को poll करेंगे.
              */
-            setJob(id, {
-              status: 'generating',
-              progress:
-                5 +
-                Math.round(
-                  (i / scenes.length) * 85
-                ),
-              completedScenes: i,
-              sceneCount: scenes.length,
-              scenes: [...urls],
-              characterMode
-            });
-
-            const completedTask =
+            const completed =
               await waitForRunwayTask(
                 taskId
               );
 
             const url =
-              completedTask?.output?.[0];
+              completed?.output?.[0];
 
             if (!url) {
               throw new Error(
@@ -435,22 +675,29 @@ app.post(
 
             urls.push(url);
 
-            const pct =
+            const progress =
               5 +
               Math.round(
-                ((i + 1) / scenes.length) * 95
+                ((i + 1) /
+                  scenes.length) *
+                  95
               );
 
             setJob(id, {
               status:
-                i + 1 === scenes.length
+                i + 1 ===
+                scenes.length
                   ? 'ready'
                   : 'generating',
 
               progress:
-                i + 1 === scenes.length
+                i + 1 ===
+                scenes.length
                   ? 100
-                  : Math.min(99, pct),
+                  : Math.min(
+                      99,
+                      progress
+                    ),
 
               completedScenes:
                 i + 1,
@@ -458,32 +705,49 @@ app.post(
               sceneCount:
                 scenes.length,
 
-              scenes: [...urls],
+              scenes:
+                [...urls],
 
               characterMode
             });
+
+            console.log(
+              `Runway scene ${i + 1}/${scenes.length} completed.`
+            );
           }
 
         } catch (error) {
           const message =
-            friendlyRunwayError(error);
+            friendlyRunwayError(
+              error
+            );
 
           setJob(id, {
-            status: 'error',
-            progress: 0,
-            completedScenes: urls.length,
-            sceneCount: scenes.length,
-            scenes: urls,
-            error: message,
+            status:
+              'error',
+
+            progress:
+              0,
+
+            completedScenes:
+              urls.length,
+
+            sceneCount:
+              scenes.length,
+
+            scenes:
+              urls,
+
+            error:
+              message,
+
             errorType:
-              error instanceof TaskFailedError
-                ? 'TASK_FAILED'
-                : 'REQUEST_FAILED'
+              'RUNWAY_ERROR'
           });
 
           console.error(
             `Runway job ${id} failed:`,
-            message
+            error
           );
         }
       })();
@@ -492,39 +756,62 @@ app.post(
       return res.status(500).json({
         ok: false,
         error:
-          friendlyRunwayError(error)
+          friendlyRunwayError(
+            error
+          )
       });
     }
   }
 );
 
-app.get('/api/job/:id', (req, res) => {
-  const job =
-    jobs.get(req.params.id);
+app.get(
+  '/api/job/:id',
+  (req, res) => {
+    const job =
+      jobs.get(
+        req.params.id
+      );
 
-  if (!job) {
-    return res.status(404).json({
-      ok: false,
-      status: 'not_found',
-      error: 'Job not found.'
-    });
+    if (!job) {
+      return res.status(404).json({
+        ok: false,
+        status:
+          'not_found',
+
+        error:
+          'Job not found.'
+      });
+    }
+
+    /*
+     * हमेशा JSON.
+     */
+    res
+      .type('application/json')
+      .json({
+        ok: true,
+        ...job
+      });
   }
-
-  res.type('application/json').json({
-    ok: true,
-    ...job
-  });
-});
+);
 
 app.post(
   '/api/render',
   upload.fields([
-    { name: 'voice', maxCount: 1 },
-    { name: 'music', maxCount: 1 }
+    {
+      name: 'voice',
+      maxCount: 1
+    },
+    {
+      name: 'music',
+      maxCount: 1
+    }
   ]),
   async (req, res) => {
     const job =
-      jobs.get(req.body?.jobId);
+      jobs.get(
+        req.body?.jobId
+      );
 
     if (
       !job ||
@@ -565,7 +852,9 @@ app.post(
           );
 
         const r =
-          await fetch(job.scenes[i]);
+          await fetch(
+            job.scenes[i]
+          );
 
         if (!r.ok) {
           throw new Error(
@@ -611,8 +900,14 @@ app.post(
               'copy'
             ])
             .save(out)
-            .on('end', resolve)
-            .on('error', reject);
+            .on(
+              'end',
+              resolve
+            )
+            .on(
+              'error',
+              reject
+            );
         }
       );
 
@@ -622,11 +917,16 @@ app.post(
       const music =
         req.files?.music?.[0]?.path;
 
-      if (!voice && !music) {
+      if (
+        !voice &&
+        !music
+      ) {
         return res.json({
           ok: true,
           video:
-            `/renders/${path.basename(out)}`
+            `/renders/${path.basename(
+              out
+            )}`
         });
       }
 
@@ -654,7 +954,10 @@ app.post(
         '0:v:0'
       ];
 
-      if (voice && music) {
+      if (
+        voice &&
+        music
+      ) {
         filters.push(
           '[1:a]volume=1[a1]',
           '[2:a]volume=0.18[a2]',
@@ -684,11 +987,15 @@ app.post(
           cmd
             .outputOptions([
               ...maps,
+
               '-c:v',
               'libx264',
+
               '-c:a',
               'aac',
+
               '-shortest',
+
               ...(filters.length
                 ? [
                     '-filter_complex',
@@ -697,15 +1004,23 @@ app.post(
                 : [])
             ])
             .save(final)
-            .on('end', resolve)
-            .on('error', reject);
+            .on(
+              'end',
+              resolve
+            )
+            .on(
+              'error',
+              reject
+            );
         }
       );
 
       res.json({
         ok: true,
         video:
-          `/renders/${path.basename(final)}`
+          `/renders/${path.basename(
+            final
+          )}`
       });
 
     } catch (error) {
