@@ -36,9 +36,6 @@ app.use(
   })
 );
 
-/*
-  index.html repository root में है।
-*/
 app.use(
   express.static(root)
 );
@@ -51,19 +48,12 @@ app.get('/', (req, res) => {
 
 const jobs = new Map();
 
-/*
-  Free Hugging Face Gradio T2V backend.
-*/
 const HF_SPACE =
   'FrameAI4687/Omni-Video-Factory';
 
 let hfClientPromise = null;
 let hfApiPromise = null;
 
-/*
-  Hugging Face client बनाना।
-  HF_TOKEN optional है।
-*/
 async function getHFClient() {
   if (!hfClientPromise) {
     hfClientPromise =
@@ -80,9 +70,6 @@ async function getHFClient() {
   return hfClientPromise;
 }
 
-/*
-  Space का actual API schema runtime पर पढ़ते हैं।
-*/
 async function getHFApi() {
   if (!hfApiPromise) {
     hfApiPromise =
@@ -99,9 +86,6 @@ async function getHFApi() {
   return hfApiPromise;
 }
 
-/*
-  Script को scenes में बाँटना।
-*/
 function splitScenes(script) {
   return script
     .replace(/\s+/g, ' ')
@@ -114,7 +98,8 @@ function splitScenes(script) {
 }
 
 /*
-  API schema में endpoint ढूँढना।
+  Omni Video Factory के endpoint को
+  उसके नाम के बजाय उसके parameters से पहचानें।
 */
 function findT2VEndpoint(api) {
   const named =
@@ -123,54 +108,114 @@ function findT2VEndpoint(api) {
   const unnamed =
     api?.unnamed_endpoints || {};
 
-  const all = {
-    ...named,
-    ...unnamed
-  };
+  const candidates = [
+    ...Object.entries(named).map(
+      ([name, info]) => ({
+        name,
+        info
+      })
+    ),
 
-  const entries =
-    Object.entries(all);
+    ...Object.entries(unnamed).map(
+      ([name, info]) => ({
+        name: Number.isNaN(Number(name))
+          ? name
+          : Number(name),
+        info
+      })
+    )
+  ];
 
   /*
-    पहले manual T2V endpoint।
+    Manual T2V को पहले प्राथमिकता।
   */
-  let found =
-    entries.find(([name]) =>
-      /t2v.*manual|manual.*t2v/i.test(
-        name
-      )
+  const manual =
+    candidates.find(endpoint => {
+      const text =
+        JSON.stringify(
+          endpoint.info || {}
+        ).toLowerCase();
+
+      return (
+        text.includes('scene count') &&
+        text.includes('seconds per scene') &&
+        text.includes('aspect ratio') &&
+        (
+          text.includes('s1') ||
+          text.includes('scene 1')
+        )
+      );
+    });
+
+  if (manual) {
+    console.log(
+      'OMNI T2V ENDPOINT FOUND:',
+      manual.name
     );
 
-  if (found) {
-    return {
-      name: found[0],
-      info: found[1]
-    };
+    return manual;
   }
 
   /*
-    फिर सामान्य T2V endpoint।
+    सामान्य T2V endpoint fallback।
   */
-  found =
-    entries.find(([name]) =>
-      /t2v|text.?to.?video/i.test(
-        name
-      )
+  const normal =
+    candidates.find(endpoint => {
+      const parameters =
+        endpoint.info?.parameters || [];
+
+      const labels =
+        parameters.map(p =>
+          String(
+            p?.label ||
+            p?.name ||
+            ''
+          ).toLowerCase()
+        );
+
+      return (
+        labels.some(x =>
+          x.includes('scene count')
+        ) &&
+        labels.some(x =>
+          x.includes('seconds per scene') ||
+          x.includes('second per scene')
+        ) &&
+        labels.some(x =>
+          x.includes('aspect ratio')
+        ) &&
+        labels.some(x =>
+          x.includes('base prompt')
+        )
+      );
+    });
+
+  if (normal) {
+    console.log(
+      'OMNI T2V ENDPOINT FOUND:',
+      normal.name
     );
 
-  if (found) {
-    return {
-      name: found[0],
-      info: found[1]
-    };
+    return normal;
   }
+
+  console.error(
+    'OMNI AVAILABLE ENDPOINTS:',
+    candidates.map(e => ({
+      name: e.name,
+      parameters:
+        (e.info?.parameters || [])
+          .map(p =>
+            p?.label ||
+            p?.name ||
+            ''
+          )
+    }))
+  );
 
   return null;
 }
 
-/*
-  Gradio API parameter order से values बनाना।
-*/
 function buildT2VInputs(
   info,
   {
@@ -211,8 +256,9 @@ function buildT2VInputs(
     }
 
     if (
-      label.includes('seconds') ||
-      label.includes('second per scene')
+      label.includes('seconds per scene') ||
+      label.includes('second per scene') ||
+      label === 'seconds'
     ) {
       values.push(secondsPerScene);
       continue;
@@ -226,7 +272,8 @@ function buildT2VInputs(
     }
 
     if (
-      label.includes('aspect')
+      label.includes('aspect ratio') ||
+      label === 'aspect'
     ) {
       values.push(aspectRatio);
       continue;
@@ -243,7 +290,9 @@ function buildT2VInputs(
       /^s1\b/.test(label) ||
       /scene 1/.test(label)
     ) {
-      values.push(scenes[0] || '');
+      values.push(
+        scenes[0] || ''
+      );
       continue;
     }
 
@@ -251,7 +300,9 @@ function buildT2VInputs(
       /^s2\b/.test(label) ||
       /scene 2/.test(label)
     ) {
-      values.push(scenes[1] || '');
+      values.push(
+        scenes[1] || ''
+      );
       continue;
     }
 
@@ -259,7 +310,9 @@ function buildT2VInputs(
       /^s3\b/.test(label) ||
       /scene 3/.test(label)
     ) {
-      values.push(scenes[2] || '');
+      values.push(
+        scenes[2] || ''
+      );
       continue;
     }
 
@@ -267,31 +320,43 @@ function buildT2VInputs(
       /^s4\b/.test(label) ||
       /scene 4/.test(label)
     ) {
-      values.push(scenes[3] || '');
+      values.push(
+        scenes[3] || ''
+      );
       continue;
     }
 
     /*
-      Unknown parameter मिलने पर null।
+      Unknown parameter के लिए null।
     */
     values.push(null);
   }
+
+  console.log(
+    'OMNI T2V INPUT COUNT:',
+    values.length
+  );
 
   return values;
 }
 
 /*
   Gradio output से video URL निकालना।
+  Omni के nested FileData/object formats को भी संभालता है।
 */
-function extractVideoUrl(value) {
+function extractVideoUrl(
+  value,
+  seen = new Set()
+) {
   if (!value) {
     return null;
   }
 
-  if (typeof value === 'string') {
+  if (
+    typeof value === 'string'
+  ) {
     if (
-      value.startsWith('http://') ||
-      value.startsWith('https://')
+      /^https?:\/\//i.test(value)
     ) {
       return value;
     }
@@ -299,10 +364,27 @@ function extractVideoUrl(value) {
     return null;
   }
 
+  if (
+    typeof value !== 'object'
+  ) {
+    return null;
+  }
+
+  if (seen.has(value)) {
+    return null;
+  }
+
+  seen.add(value);
+
   if (Array.isArray(value)) {
-    for (const item of value) {
+    for (
+      const item of value
+    ) {
       const found =
-        extractVideoUrl(item);
+        extractVideoUrl(
+          item,
+          seen
+        );
 
       if (found) {
         return found;
@@ -312,19 +394,37 @@ function extractVideoUrl(value) {
     return null;
   }
 
-  if (typeof value === 'object') {
-    const candidates = [
-      value.url,
-      value.video,
-      value.file?.url,
-      value.file?.path,
-      value.data,
-      value.path
-    ];
+  /*
+    Video/FileData में सामान्य fields।
+  */
+  const preferredKeys = [
+    'url',
+    'video',
+    'file',
+    'path',
+    'data',
+    'value',
+    'output',
+    'video_url',
+    'videoUrl',
+    'filename',
+    'name'
+  ];
 
-    for (const item of candidates) {
+  for (
+    const key of preferredKeys
+  ) {
+    if (
+      Object.prototype.hasOwnProperty.call(
+        value,
+        key
+      )
+    ) {
       const found =
-        extractVideoUrl(item);
+        extractVideoUrl(
+          value[key],
+          seen
+        );
 
       if (found) {
         return found;
@@ -332,12 +432,27 @@ function extractVideoUrl(value) {
     }
   }
 
+  /*
+    आखिरी fallback:
+    object की सभी values recursively देखें।
+  */
+  for (
+    const item of Object.values(value)
+  ) {
+    const found =
+      extractVideoUrl(
+        item,
+        seen
+      );
+
+    if (found) {
+      return found;
+    }
+  }
+
   return null;
 }
 
-/*
-  Space status/API diagnostic.
-*/
 app.get(
   '/api/status',
   async (req, res) => {
@@ -351,17 +466,24 @@ app.get(
       res.json({
         backend:
           'Hugging Face Omni Video Factory',
+
         space:
           HF_SPACE,
-        gradio: true,
+
+        gradio:
+          true,
+
         t2vEndpoint:
-          endpoint?.name || null,
-        ffmpeg: true
+          endpoint?.name ?? null,
+
+        ffmpeg:
+          true
       });
     } catch (error) {
       res.status(503).json({
         backend:
           'Hugging Face Omni Video Factory',
+
         error:
           error?.message ||
           String(error)
@@ -375,6 +497,7 @@ app.get(
 */
 app.post(
   '/api/generate',
+
   upload.fields([
     {
       name: 'voice',
@@ -389,6 +512,7 @@ app.post(
       maxCount: 1
     }
   ]),
+
   async (req, res) => {
     try {
       const {
@@ -421,13 +545,20 @@ app.post(
       jobs.set(id, {
         status:
           'generating',
-        progress: 2,
-        scenes: [],
+
+        progress:
+          2,
+
+        scenes:
+          [],
+
         characterMode
       });
 
       res.json({
-        jobId: id,
+        jobId:
+          id,
+
         sceneCount:
           scenes.length
       });
@@ -440,8 +571,13 @@ app.post(
           jobs.set(id, {
             status:
               'generating',
-            progress: 5,
-            scenes: [],
+
+            progress:
+              5,
+
+            scenes:
+              [],
+
             characterMode
           });
 
@@ -456,14 +592,10 @@ app.post(
 
           if (!endpoint) {
             throw new Error(
-              'Omni Video Factory का Text-to-Video API endpoint नहीं मिला।'
+              'Omni Video Factory का Text-to-Video endpoint नहीं मिला।'
             );
           }
 
-          /*
-            Maximum 4 scenes क्योंकि Space का T2V UI
-            1-4 scenes देता है।
-          */
           const sceneCount =
             Math.min(
               Math.max(
@@ -479,13 +611,26 @@ app.post(
               sceneCount
             );
 
-          const secondsPerScene = 3;
+          /*
+            Omni supported values:
+            seconds = 3 or 5
+            resolution = 384 or 512
+          */
+          const secondsPerScene =
+            3;
 
-          const resolution = 384;
+          const resolution =
+            384;
 
           const aspectRatio =
-            format === '16:9'
-              ? '16:9'
+            [
+              '16:9',
+              '4:3',
+              '1:1',
+              '3:4',
+              '9:16'
+            ].includes(format)
+              ? format
               : '9:16';
 
           const basePrompt =
@@ -496,10 +641,15 @@ app.post(
               endpoint.info,
               {
                 sceneCount,
+
                 secondsPerScene,
+
                 resolution,
+
                 aspectRatio,
+
                 basePrompt,
+
                 scenes:
                   selectedScenes
               }
@@ -508,8 +658,13 @@ app.post(
           jobs.set(id, {
             status:
               'generating',
-            progress: 10,
-            scenes: [],
+
+            progress:
+              10,
+
+            scenes:
+              [],
+
             characterMode
           });
 
@@ -522,12 +677,20 @@ app.post(
               inputs
             );
 
-          let lastProgress = 10;
-          let finalData = null;
+          let lastProgress =
+            10;
+
+          let finalData =
+            null;
 
           for await (
             const message of job
           ) {
+            console.log(
+              'OMNI MESSAGE TYPE:',
+              message?.type
+            );
+
             if (
               message?.type ===
               'status'
@@ -548,9 +711,13 @@ app.post(
                 jobs.set(id, {
                   status:
                     'generating',
+
                   progress:
                     lastProgress,
-                  scenes: [],
+
+                  scenes:
+                    [],
+
                   characterMode
                 });
               }
@@ -562,8 +729,13 @@ app.post(
                 jobs.set(id, {
                   status:
                     'generating',
-                  progress: 90,
-                  scenes: [],
+
+                  progress:
+                    90,
+
+                  scenes:
+                    [],
+
                   characterMode
                 });
               }
@@ -575,6 +747,15 @@ app.post(
             ) {
               finalData =
                 message.data;
+
+              console.log(
+                'OMNI RAW OUTPUT:',
+                JSON.stringify(
+                  finalData,
+                  null,
+                  2
+                )
+              );
             }
           }
 
@@ -589,21 +770,36 @@ app.post(
               finalData
             );
 
+          console.log(
+            'OMNI EXTRACTED VIDEO URL:',
+            videoUrl
+          );
+
           if (!videoUrl) {
             throw new Error(
-              'AI ने output दिया लेकिन MP4 video URL नहीं मिला।'
+              'AI ने output दिया लेकिन video file URL नहीं मिला।'
             );
           }
 
           jobs.set(id, {
             status:
               'ready',
-            progress: 95,
+
+            progress:
+              95,
+
             scenes: [
               videoUrl
             ],
+
             characterMode
           });
+
+          console.log(
+            'OMNI VIDEO READY:',
+            id
+          );
+
         } catch (error) {
           console.error(
             'T2V ERROR:',
@@ -613,8 +809,13 @@ app.post(
           jobs.set(id, {
             status:
               'error',
-            progress: 0,
-            scenes: [],
+
+            progress:
+              0,
+
+            scenes:
+              [],
+
             error:
               error?.message ||
               String(error)
@@ -654,6 +855,7 @@ app.get(
 */
 app.post(
   '/api/render',
+
   upload.fields([
     {
       name: 'voice',
@@ -664,6 +866,7 @@ app.post(
       maxCount: 1
     }
   ]),
+
   async (req, res) => {
     const job =
       jobs.get(
@@ -690,9 +893,6 @@ app.post(
     try {
       const files = [];
 
-      /*
-        Omni का generated video download।
-      */
       for (
         let i = 0;
         i < job.scenes.length;
@@ -726,10 +926,9 @@ app.post(
         files.push(p);
       }
 
-      /*
-        एक video है तो सीधे उसे final बनाते हैं।
-      */
-      if (files.length === 1) {
+      if (
+        files.length === 1
+      ) {
         fs.copyFileSync(
           files[0],
           out
@@ -744,6 +943,7 @@ app.post(
 
         fs.writeFileSync(
           list,
+
           files
             .map(
               f =>
@@ -791,7 +991,7 @@ app.post(
           ?.path;
 
       /*
-        Uploaded voice/music को video में mix करना।
+        Voice/music mix.
       */
       if (
         voice ||
@@ -815,6 +1015,7 @@ app.post(
         }
 
         const filters = [];
+
         let inputs = [];
 
         if (
@@ -833,13 +1034,17 @@ app.post(
             '-map',
             '[aout]'
           ];
-        } else if (voice) {
+
+        } else if (
+          voice
+        ) {
           inputs = [
             '-map',
             '0:v:0',
             '-map',
             '1:a:0'
           ];
+
         } else {
           inputs = [
             '-map',
@@ -854,11 +1059,15 @@ app.post(
             cmd
               .outputOptions([
                 ...inputs,
+
                 '-c:v',
                 'libx264',
+
                 '-c:a',
                 'aac',
+
                 '-shortest',
+
                 ...(filters.length
                   ? [
                       '-filter_complex',
