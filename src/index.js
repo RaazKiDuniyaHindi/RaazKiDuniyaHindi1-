@@ -20,11 +20,15 @@ const upload = multer({
 const jobs = new Map();
 
 const SPACE = 'FrameAI4687/Omni-Video-Factory';
-const HF_SPACE_URL =
-  'https://frameai4687-omni-video-factory.hf.space';
+const HF = 'https://frameai4687-omni-video-factory.hf.space';
 
-fs.mkdirSync(path.join(root, 'uploads'), { recursive: true });
-fs.mkdirSync(path.join(root, 'renders'), { recursive: true });
+fs.mkdirSync(path.join(root, 'uploads'), {
+  recursive: true
+});
+
+fs.mkdirSync(path.join(root, 'renders'), {
+  recursive: true
+});
 
 app.use(express.json());
 app.use(express.static(root));
@@ -37,48 +41,109 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(root, 'index.html'));
 });
 
-let GRADIO_CLIENT = null;
+let C = null;
 
-async function getClient() {
-  if (!GRADIO_CLIENT) {
-    GRADIO_CLIENT = await Client.connect(SPACE);
+async function client() {
+  if (!C) {
+    C = await Client.connect(SPACE);
   }
 
-  return GRADIO_CLIENT;
+  return C;
 }
 
-/* -------------------------------------------------- */
-/* Find Omni Text-to-Video endpoint                   */
-/* -------------------------------------------------- */
+/* ================================
+   FIND OMNI T2V
+================================ */
 
-function findT2VEndpoint(api) {
+function findT2V(api) {
   const all = {
     ...(api.named_endpoints || {}),
     ...(api.unnamed_endpoints || {})
   };
 
-  for (const [endpoint, info] of Object.entries(all)) {
-    const text = JSON.stringify(info).toLowerCase();
+  for (const [name, info] of Object.entries(all)) {
+    const params = info?.parameters || [];
+
+    const labels = params.map(x =>
+      String(
+        x.label ||
+        x.name ||
+        x.parameter_name ||
+        ''
+      ).toLowerCase()
+    );
+
+    const joined = labels.join(' | ');
+
+    const sceneCount = labels.some(x =>
+      x.includes('scene count')
+    );
+
+    const seconds = labels.some(x =>
+      x.includes('seconds')
+    );
+
+    const resolution = labels.some(x =>
+      x.includes('resolution')
+    );
+
+    const aspect = labels.some(x =>
+      x.includes('aspect ratio')
+    );
+
+    const basePrompt = labels.some(x =>
+      x.includes('base prompt')
+    );
+
+    const scene1 = labels.some(x =>
+      x.includes('scene 1') ||
+      x.includes('s1')
+    );
+
+    const hasImageInput =
+      labels.some(x =>
+        x.includes('image file') ||
+        x.includes('input image') ||
+        x === 'image' ||
+        x.includes('start image')
+      );
+
+    console.log(
+      'OMNI ENDPOINT:',
+      name,
+      'PARAMS:',
+      params.length,
+      joined
+    );
 
     if (
-      text.includes('scene count') &&
-      text.includes('seconds per scene') &&
-      text.includes('aspect ratio') &&
-      text.includes('base prompt')
+      params.length === 9 &&
+      sceneCount &&
+      seconds &&
+      resolution &&
+      aspect &&
+      basePrompt &&
+      scene1 &&
+      !hasImageInput
     ) {
-      return [endpoint, info];
+      console.log(
+        'OMNI T2V FOUND:',
+        name
+      );
+
+      return [name, info];
     }
   }
 
   return null;
 }
 
-/* -------------------------------------------------- */
-/* Convert Gradio FileData / URL / path to video URL  */
-/* -------------------------------------------------- */
+/* ================================
+   EXTRACT VIDEO
+================================ */
 
-function extractVideo(value, seen = new Set()) {
-  if (value == null) {
+function getVideo(value, seen = new Set()) {
+  if (!value) {
     return null;
   }
 
@@ -94,17 +159,22 @@ function extractVideo(value, seen = new Set()) {
     }
 
     if (
-      text.startsWith('/gradio_api/file=') ||
+      text.startsWith('/gradio_api/file=')
+    ) {
+      return HF + text;
+    }
+
+    if (
       text.startsWith('/file=')
     ) {
-      return HF_SPACE_URL + text;
+      return HF + text;
     }
 
     if (
       /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(text)
     ) {
       return (
-        HF_SPACE_URL +
+        HF +
         '/gradio_api/file=' +
         encodeURIComponent(text)
       );
@@ -113,36 +183,18 @@ function extractVideo(value, seen = new Set()) {
     return null;
   }
 
-  if (typeof value !== 'object') {
-    return null;
-  }
-
-  if (seen.has(value)) {
+  if (
+    typeof value !== 'object' ||
+    seen.has(value)
+  ) {
     return null;
   }
 
   seen.add(value);
 
-  /* Gradio FileData.url */
-  if (typeof value.url === 'string') {
-    const u = value.url.trim();
-
-    if (/^https?:\/\//i.test(u)) {
-      return u;
-    }
-
-    if (
-      u.startsWith('/gradio_api/file=') ||
-      u.startsWith('/file=')
-    ) {
-      return HF_SPACE_URL + u;
-    }
-  }
-
-  /* Search common FileData/output properties */
-  const keys = [
-    'video',
+  const directKeys = [
     'url',
+    'video',
     'path',
     'file',
     'data',
@@ -152,22 +204,27 @@ function extractVideo(value, seen = new Set()) {
     'result'
   ];
 
-  for (const key of keys) {
+  for (const key of directKeys) {
     if (!(key in value)) {
       continue;
     }
 
-    const found = extractVideo(value[key], seen);
+    const found = getVideo(
+      value[key],
+      seen
+    );
 
     if (found) {
       return found;
     }
   }
 
-  /* Arrays / unknown nested objects */
   if (Array.isArray(value)) {
     for (const item of value) {
-      const found = extractVideo(item, seen);
+      const found = getVideo(
+        item,
+        seen
+      );
 
       if (found) {
         return found;
@@ -176,11 +233,14 @@ function extractVideo(value, seen = new Set()) {
   }
 
   for (const [key, child] of Object.entries(value)) {
-    if (keys.includes(key)) {
+    if (directKeys.includes(key)) {
       continue;
     }
 
-    const found = extractVideo(child, seen);
+    const found = getVideo(
+      child,
+      seen
+    );
 
     if (found) {
       return found;
@@ -190,15 +250,15 @@ function extractVideo(value, seen = new Set()) {
   return null;
 }
 
-/* -------------------------------------------------- */
-/* Build Omni parameters                              */
-/* -------------------------------------------------- */
+/* ================================
+   BUILD T2V INPUTS
+================================ */
 
-function buildParameters(endpointInfo, body) {
-  const parameters =
-    endpointInfo.parameters || [];
+function buildValues(info, body) {
+  const params =
+    info?.parameters || [];
 
-  return parameters.map((param) => {
+  return params.map(param => {
     const label = String(
       param.label ||
       param.name ||
@@ -206,40 +266,40 @@ function buildParameters(endpointInfo, body) {
       ''
     ).toLowerCase();
 
-    /* Scene count */
-    if (label.includes('scene count')) {
+    if (
+      label.includes('scene count')
+    ) {
       return 1;
     }
 
-    /* Seconds per scene */
     if (
-      label.includes('seconds per scene') ||
-      label.includes('seconds')
+      label.includes('seconds per scene')
     ) {
       return 3;
     }
 
-    /* Resolution */
-    if (label.includes('resolution')) {
+    if (
+      label.includes('resolution')
+    ) {
       return 384;
     }
 
-    /* Aspect ratio */
-    if (label.includes('aspect ratio')) {
+    if (
+      label.includes('aspect ratio')
+    ) {
       return body.format || '9:16';
     }
 
-    /* Base prompt */
-    if (label.includes('base prompt')) {
+    if (
+      label.includes('base prompt')
+    ) {
       return (
-        `Create a cinematic ${body.style || 'Mystery'} ` +
-        `realistic video. High quality visual storytelling.`
+        `Cinematic ${body.style || 'Mystery'} ` +
+        `realistic storytelling video`
       );
     }
 
-    /* Scene prompts */
     if (
-      label.includes('scene prompt 1') ||
       label.includes('scene 1') ||
       label.startsWith('s1')
     ) {
@@ -247,7 +307,6 @@ function buildParameters(endpointInfo, body) {
     }
 
     if (
-      label.includes('scene prompt 2') ||
       label.includes('scene 2') ||
       label.startsWith('s2')
     ) {
@@ -255,7 +314,6 @@ function buildParameters(endpointInfo, body) {
     }
 
     if (
-      label.includes('scene prompt 3') ||
       label.includes('scene 3') ||
       label.startsWith('s3')
     ) {
@@ -263,7 +321,6 @@ function buildParameters(endpointInfo, body) {
     }
 
     if (
-      label.includes('scene prompt 4') ||
       label.includes('scene 4') ||
       label.startsWith('s4')
     ) {
@@ -274,9 +331,9 @@ function buildParameters(endpointInfo, body) {
   });
 }
 
-/* -------------------------------------------------- */
-/* Generate AI video                                  */
-/* -------------------------------------------------- */
+/* ================================
+   GENERATE
+================================ */
 
 app.post(
   '/api/generate',
@@ -299,40 +356,33 @@ app.post(
       req.body?.script?.trim();
 
     if (!script) {
-      return res
-        .status(400)
-        .json({
-          error: 'Script डालें।'
-        });
+      return res.status(400).json({
+        error: 'Script डालें।'
+      });
     }
 
-    const jobId =
+    const id =
       Date.now().toString();
 
-    jobs.set(jobId, {
+    jobs.set(id, {
       status: 'generating',
       progress: 5,
       scenes: []
     });
 
     res.json({
-      jobId,
+      jobId: id,
       sceneCount: 1
     });
 
     try {
-      const client =
-        await getClient();
-
-      console.log(
-        'Connecting to Omni Video Factory...'
-      );
+      const c = await client();
 
       const api =
-        await client.view_api(true);
+        await c.view_api(true);
 
       const endpoint =
-        findT2VEndpoint(api);
+        findT2V(api);
 
       if (!endpoint) {
         throw new Error(
@@ -340,20 +390,12 @@ app.post(
         );
       }
 
-      const endpointName =
-        endpoint[0];
-
-      const endpointInfo =
-        endpoint[1];
-
-      console.log(
-        'OMNI T2V ENDPOINT:',
-        endpointName
-      );
+      const name = endpoint[0];
+      const info = endpoint[1];
 
       const values =
-        buildParameters(
-          endpointInfo,
+        buildValues(
+          info,
           {
             script,
             format:
@@ -364,47 +406,66 @@ app.post(
         );
 
       console.log(
-        'OMNI INPUT COUNT:',
-        values.length
+        'OMNI CALL:',
+        name
       );
 
-      /*
-       * IMPORTANT:
-       * Use predict() so we receive the
-       * completed Gradio result directly.
-       */
-      const response =
-        await client.predict(
-          endpointName,
+      console.log(
+        'OMNI INPUTS:',
+        JSON.stringify(values)
+      );
+
+      const job =
+        c.submit(
+          name,
           values
         );
 
+      let result = null;
+
+      for await (const msg of job) {
+        console.log(
+          'OMNI MESSAGE:',
+          JSON.stringify(msg).slice(
+            0,
+            5000
+          )
+        );
+
+        if (
+          msg &&
+          msg.type === 'data'
+        ) {
+          result = msg.data;
+        }
+      }
+
       console.log(
-        'OMNI RESPONSE:',
-        JSON.stringify(response).slice(
+        'OMNI FINAL:',
+        JSON.stringify(result).slice(
           0,
           10000
         )
       );
 
-      const videoUrl =
-        extractVideo(response);
+      const video =
+        getVideo(result);
 
-      if (!videoUrl) {
+      if (!video) {
         throw new Error(
-          'AI ने video output नहीं दिया। Omni response में video file नहीं मिली।'
+          'AI ने video output नहीं दिया।'
         );
       }
 
       console.log(
-        'OMNI VIDEO URL:',
-        videoUrl
+        'OMNI VIDEO:',
+        video
       );
 
-      jobs.set(jobId, {
+      jobs.set(id, {
         status: 'ready',
         progress: 100,
-        scenes: [videoUrl]
+        scenes: [video]
       });
 
     } catch (error) {
@@ -413,7 +474,7 @@ app.post(
         error
       );
 
-      jobs.set(jobId, {
+      jobs.set(id, {
         status: 'error',
         progress: 0,
         scenes: [],
@@ -425,9 +486,9 @@ app.post(
   }
 );
 
-/* -------------------------------------------------- */
-/* Job status                                         */
-/* -------------------------------------------------- */
+/* ================================
+   JOB STATUS
+================================ */
 
 app.get(
   '/api/job/:id',
@@ -440,9 +501,9 @@ app.get(
   }
 );
 
-/* -------------------------------------------------- */
-/* Final render with voice/music                      */
-/* -------------------------------------------------- */
+/* ================================
+   RENDER
+================================ */
 
 app.post(
   '/api/render',
@@ -464,12 +525,10 @@ app.post(
       !job ||
       job.status !== 'ready'
     ) {
-      return res
-        .status(400)
-        .json({
-          error:
-            'पहले AI video generate करें।'
-        });
+      return res.status(400).json({
+        error:
+          'पहले AI video generate करें।'
+      });
     }
 
     const output =
@@ -491,14 +550,11 @@ app.post(
         );
       }
 
-      const buffer =
-        Buffer.from(
-          await response.arrayBuffer()
-        );
-
       fs.writeFileSync(
         output,
-        buffer
+        Buffer.from(
+          await response.arrayBuffer()
+        )
       );
 
       const voice =
@@ -583,20 +639,18 @@ app.post(
         error
       );
 
-      res
-        .status(500)
-        .json({
-          error:
-            error?.message ||
-            String(error)
-        });
+      res.status(500).json({
+        error:
+          error?.message ||
+          String(error)
+      });
     }
   }
 );
 
-/* -------------------------------------------------- */
-/* Start server                                       */
-/* -------------------------------------------------- */
+/* ================================
+   START
+================================ */
 
 const PORT =
   Number(
