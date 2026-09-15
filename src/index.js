@@ -399,55 +399,57 @@ async function generateLtxVideo(
    * "text-to-video"
    */
   const result =
-    await client.predict(
-      '/text_to_video',
-      [
-        prompt,
-        negativePrompt,
-        null,
-        null,
-        height,
-        width,
-        'text-to-video',
-        duration,
-        frames,
-        -1,
-        true,
-        1,
-        false
-      ]
-    );
-
-  console.log(
-    `LTX scene ${sceneNumber} response received.`
+  await client.predict(
+    '/text_to_video',
+    [
+      prompt,
+      negativePrompt,
+      null,
+      null,
+      height,
+      width,
+      'text-to-video',
+      duration,
+      frames,
+      42,
+      true,
+      1,
+      false
+    ]
   );
 
-  const videoUrl =
-    extractVideoUrl(
-      result?.data
-    );
+console.log(
+  `LTX scene ${sceneNumber} response received.`
+);
 
-  if (!videoUrl) {
-    console.error(
-      'LTX raw response:',
-      JSON.stringify(
-        result,
-        null,
-        2
-      )
-    );
+console.log(
+  'LTX raw response:',
+  JSON.stringify(
+    result,
+    null,
+    2
+  )
+);
 
-    throw new Error(
-      'LTX ने video URL नहीं लौटाया।'
-    );
-  }
+const videoUrl =
+  extractVideoUrl(result?.data);
 
-  await downloadVideo(
-    videoUrl,
-    destination
+if (!videoUrl) {
+  throw new Error(
+    'LTX ने video file लौटाई, लेकिन उसका URL हमारे code ने पहचान नहीं पाया।'
   );
+}
 
-  return destination;
+console.log(
+  `LTX video URL found for scene ${sceneNumber}`
+);
+
+await downloadVideo(
+  videoUrl,
+  destination
+);
+
+return destination;
 }
 
 /*
