@@ -7,418 +7,257 @@ import { fileURLToPath } from 'url';
 import ffmpeg from 'fluent-ffmpeg';
 import { Client } from '@gradio/client';
 
-const __dirname =
-  path.dirname(fileURLToPath(import.meta.url));
+const __dirname=path.dirname(fileURLToPath(import.meta.url));
+const root=path.join(__dirname,'..');
+const app=express();
+const upload=multer({dest:path.join(root,'uploads')});
+const jobs=new Map();
 
-const root =
-  path.join(__dirname, '..');
+const SPACE='FrameAI4687/Omni-Video-Factory';
+const SPACE_URL='https://frameai4687-omni-video-factory.hf.space';
 
-const app = express();
+fs.mkdirSync(path.join(root,'uploads'),{recursive:true});
+fs.mkdirSync(path.join(root,'renders'),{recursive:true});
 
-const upload =
-  multer({
-    dest: path.join(root, 'uploads')
-  });
+app.use(express.json({limit:'5mb'}));
+app.use(express.static(root));
+app.use('/renders',express.static(path.join(root,'renders')));
+app.get('/',(q,r)=>r.sendFile(path.join(root,'index.html')));
 
-fs.mkdirSync(
-  path.join(root, 'uploads'),
-  { recursive: true }
-);
+let cp,ap;
 
-fs.mkdirSync(
-  path.join(root, 'renders'),
-  { recursive: true }
-);
-
-app.use(
-  express.json({
-    limit: '5mb'
-  })
-);
-
-app.use(
-  express.static(root)
-);
-
-app.use(
-  '/renders',
-  express.static(
-    path.join(
-      root,
-      'renders'
-    )
-  )
-);
-
-app.get('/', (req, res) => {
-  res.sendFile(
-    path.join(
-      root,
-      'index.html'
-    )
+async function client(){
+  if(!cp)cp=Client.connect(
+    SPACE,
+    process.env.HF_TOKEN?{token:process.env.HF_TOKEN}:undefined
   );
-});
-
-const jobs =
-  new Map();
-
-const HF_SPACE =
-  'FrameAI4687/Omni-Video-Factory';
-
-const HF_SPACE_URL =
-  'https://frameai4687-omni-video-factory.hf.space';
-
-let hfClientPromise =
-  null;
-
-let hfApiPromise =
-  null;
-
-
-async function getHFClient() {
-
-  if (!hfClientPromise) {
-
-    hfClientPromise =
-      Client.connect(
-        HF_SPACE,
-        process.env.HF_TOKEN
-          ? {
-              token:
-                process.env.HF_TOKEN
-            }
-          : undefined
-      );
-
-  }
-
-  return hfClientPromise;
+  return cp;
 }
 
-
-async function getHFApi() {
-
-  if (!hfApiPromise) {
-
-    hfApiPromise =
-      (async () => {
-
-        const client =
-          await getHFClient();
-
-        return await client.view_api(
-          true
-        );
-
-      })();
-
-  }
-
-  return hfApiPromise;
+async function api(){
+  if(!ap)ap=client().then(x=>x.view_api(true));
+  return ap;
 }
 
-
-function splitScenes(script) {
-
-  return script
-    .replace(
-      /\s+/g,
-      ' '
-    )
-    .trim()
-    .split(
-      /(?<=[.!?।])\s+/
-    )
-    .filter(Boolean)
-    .slice(0, 4);
-
+function split(s){
+  return s.replace(/\s+/g,' ').trim()
+    .split(/(?<=[.!?।])\s+/)
+    .filter(Boolean).slice(0,4);
 }
 
-
-function findT2VEndpoint(api) {
-
-  const named =
-    api?.named_endpoints ||
-    {};
-
-  const unnamed =
-    api?.unnamed_endpoints ||
-    {};
-
-  const candidates = [
-
-    ...Object.entries(
-      named
-    ).map(
-      ([name, info]) => ({
-        name,
-        info
-      })
-    ),
-
-    ...Object.entries(
-      unnamed
-    ).map(
-      ([name, info]) => ({
-        name:
-          Number.isNaN(
-            Number(name)
-          )
-            ? name
-            : Number(name),
-        info
-      })
-    )
-
+function endpoint(a){
+  const x=[
+    ...Object.entries(a?.named_endpoints||{}),
+    ...Object.entries(a?.unnamed_endpoints||{})
   ];
+  return x.find(([n,v])=>{
+    const s=JSON.stringify(v).toLowerCase();
+    return s.includes('scene count')&&
+      s.includes('seconds per scene')&&
+      s.includes('aspect ratio')&&
+      s.includes('base prompt');
+  });
+}
 
+function makeInputs(info,o){
+  return (info.parameters||[]).map(p=>{
+    const n=String(p.label||p.name||'').toLowerCase();
 
-  const match =
-    candidates.find(
-      endpoint => {
+    if(n.includes('scene count'))return o.count;
+    if(n.includes('seconds per scene'))return 3;
+    if(n.includes('resolution'))return 384;
+    if(n.includes('aspect ratio'))return o.ratio;
+    if(n.includes('base prompt'))return o.base;
 
-        const text =
-          JSON.stringify(
-            endpoint.info ||
-            {}
-          ).toLowerCase();
+    for(let i=1;i<=4;i++)
+      if(n.includes('scene '+i)||n.startsWith('s'+i))
+        return o.sc[i-1]||'';
 
-        return (
-          text.includes(
-            'scene count'
-          ) &&
-          text.includes(
-            'seconds per scene'
-          ) &&
-          text.includes(
-            'aspect ratio'
-          ) &&
-          text.includes(
-            'base prompt'
-          )
-        );
+    return null;
+  });
+}
 
-      }
-    );
+function video(v,seen=new Set()){
+  if(!v)return null;
 
-
-  if (match) {
-
-    console.log(
-      'OMNI T2V ENDPOINT FOUND:',
-      match.name
-    );
-
-    return match;
+  if(typeof v==='string'){
+    if(/^https?:\/\//i.test(v))return v;
+    if(/\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(v))
+      return SPACE_URL+'/gradio_api/file='+encodeURIComponent(v);
+    return null;
   }
 
+  if(typeof v!=='object'||seen.has(v))return null;
+  seen.add(v);
 
-  console.error(
-    'OMNI AVAILABLE ENDPOINTS:',
-    candidates.map(
-      e => ({
-        name:
-          e.name,
+  if(Array.isArray(v))
+    for(const x of v){
+      const u=video(x,seen);
+      if(u)return u;
+    }
 
-        parameters:
-          (
-            e.info?.parameters ||
-            []
-          ).map(
-            p =>
-              p?.label ||
-              p?.name ||
-              ''
-          )
-      })
-    )
-  );
-
+  for(const k of ['url','path','video','file','data','value','output']){
+    if(k in v){
+      const u=video(v[k],seen);
+      if(u)return u;
+    }
+  }
   return null;
 }
 
+app.get('/api/status',async(q,r)=>{
+  try{
+    const e=endpoint(await api());
+    r.json({space:SPACE,t2vEndpoint:e?.[0]||null});
+  }catch(e){
+    r.status(503).json({error:e.message});
+  }
+});
 
-function buildT2VInputs(
-  info,
-  options
-) {
+app.post('/api/generate',
+upload.fields([
+  {name:'voice',maxCount:1},
+  {name:'music',maxCount:1},
+  {name:'characterImage',maxCount:1}
+]),async(q,r)=>{
 
-  const {
-    sceneCount,
-    secondsPerScene,
-    resolution,
-    aspectRatio,
-    basePrompt,
-    scenes
-  } = options;
+  const script=q.body?.script?.trim();
+  if(!script)return r.status(400).json({error:'Script is required.'});
 
+  const sc=split(script);
+  const id=Date.now().toString();
 
-  const parameters =
-    info?.parameters ||
-    [];
+  jobs.set(id,{status:'generating',progress:5,scenes:[]});
+  r.json({jobId:id,sceneCount:sc.length});
 
+  try{
+    const a=await api();
+    const e=endpoint(a);
 
-  if (
-    !parameters.length
-  ) {
+    if(!e)throw Error('Omni Video Factory T2V endpoint नहीं मिला।');
 
-    throw new Error(
-      'Omni Video Factory का T2V API schema खाली मिला।'
+    const count=Math.min(Math.max(sc.length,1),4);
+    const ratio=['9:16','16:9','4:3','1:1','3:4']
+      .includes(q.body.format)?q.body.format:'9:16';
+
+    const base=
+      `Cinematic ${q.body.style||'Mystery'} Hindi documentary. `+
+      `Realistic visuals, no text, no subtitles, no logos.`;
+
+    const job=(await client()).submit(
+      e[0],
+      makeInputs(e[1],{count,ratio,base,sc})
     );
 
-  }
+    let data;
 
+    for await(const m of job){
+      if(m?.type==='status')
+        jobs.set(id,{
+          status:'generating',
+          progress:Math.min((jobs.get(id)?.progress||5)+2,85),
+          scenes:[]
+        });
 
-  return parameters.map(
-    parameter => {
-
-      const label =
-        String(
-          parameter?.label ||
-          parameter?.name ||
-          ''
-        )
-        .toLowerCase()
-        .trim();
-
-
-      if (
-        label.includes(
-          'scene count'
-        ) ||
-        label === 'scenes' ||
-        label.includes(
-          'number of scene'
-        )
-      ) {
-        return sceneCount;
-      }
-
-
-      if (
-        label.includes(
-          'seconds per scene'
-        ) ||
-        label.includes(
-          'second per scene'
-        ) ||
-        label === 'seconds'
-      ) {
-        return secondsPerScene;
-      }
-
-
-      if (
-        label.includes(
-          'resolution'
-        )
-      ) {
-        return resolution;
-      }
-
-
-      if (
-        label.includes(
-          'aspect ratio'
-        ) ||
-        label === 'aspect'
-      ) {
-        return aspectRatio;
-      }
-
-
-      if (
-        label.includes(
-          'base prompt'
-        )
-      ) {
-        return basePrompt;
-      }
-
-
-      if (
-        /^s1\b/.test(label) ||
-        /scene 1/.test(label)
-      ) {
-        return scenes[0] || '';
-      }
-
-
-      if (
-        /^s2\b/.test(label) ||
-        /scene 2/.test(label)
-      ) {
-        return scenes[1] || '';
-      }
-
-
-      if (
-        /^s3\b/.test(label) ||
-        /scene 3/.test(label)
-      ) {
-        return scenes[2] || '';
-      }
-
-
-      if (
-        /^s4\b/.test(label) ||
-        /scene 4/.test(label)
-      ) {
-        return scenes[3] || '';
-      }
-
-
-      return null;
-
+      if(m?.type==='data')data=m.data;
     }
+
+    const u=video(data);
+    if(!u)throw Error('AI output मिला लेकिन video URL नहीं मिला।');
+
+    jobs.set(id,{status:'ready',progress:100,scenes:[u]});
+
+  }catch(e){
+    console.error(e);
+    jobs.set(id,{
+      status:'error',
+      progress:0,
+      scenes:[],
+      error:e.message
+    });
+  }
+});
+
+app.get('/api/job/:id',(q,r)=>{
+  r.json(jobs.get(q.params.id)||{status:'not_found'});
+});
+
+app.post('/api/render',
+upload.fields([
+  {name:'voice',maxCount:1},
+  {name:'music',maxCount:1}
+]),async(q,r)=>{
+
+  const j=jobs.get(q.body.jobId);
+
+  if(!j||j.status!=='ready')
+    return r.status(400).json({
+      error:'पहले AI video generate करें।'
+    });
+
+  const out=path.join(
+    root,'renders',q.body.jobId+'.mp4'
   );
-}
 
+  try{
+    const x=await fetch(j.scenes[0]);
+    if(!x.ok)throw Error('AI video download failed.');
 
-function gradioPathToUrl(
-  value
-) {
-
-  if (
-    typeof value !==
-    'string'
-  ) {
-    return null;
-  }
-
-
-  const text =
-    value.trim();
-
-
-  if (!text) {
-    return null;
-  }
-
-
-  if (
-    /^https?:\/\//i.test(
-      text
-    )
-  ) {
-    return text;
-  }
-
-
-  if (
-    /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(
-      text
-    )
-  ) {
-
-    return (
-      `${HF_SPACE_URL}/gradio_api/file=` +
-      encodeURIComponent(
-        text
-      )
+    fs.writeFileSync(
+      out,
+      Buffer.from(await x.arrayBuffer())
     );
 
+    const voice=q.files?.voice?.[0]?.path;
+    const music=q.files?.music?.[0]?.path;
+
+    if(!voice&&!music)
+      return r.json({
+        video:'/renders/'+path.basename(out)
+      });
+
+    const final=out.replace('.mp4','_final.mp4');
+    const cmd=ffmpeg(out);
+
+    if(voice)cmd.input(voice);
+    if(music)cmd.input(music);
+
+    let opts=['-map','0:v:0'];
+
+    if(voice&&music){
+      opts.push(
+        '-filter_complex',
+        '[1:a]volume=1[a];[2:a]volume=.18[b];[a][b]amix=2:duration=first[aout]',
+        '-map','[aout]'
+      );
+    }else{
+      opts.push('-map','1:a:0');
+    }
+
+    opts.push(
+      '-c:v','libx264',
+      '-c:a','aac',
+      '-shortest'
+    );
+
+    await new Promise((ok,no)=>
+      cmd.outputOptions(opts)
+        .save(final)
+        .on('end',ok)
+        .on('error',no)
+    );
+
+    r.json({
+      video:'/renders/'+path.basename(final)
+    });
+
+  }catch(e){
+    r.status(500).json({error:e.message});
   }
+});
 
+const PORT=Number(process.env.PORT||3000);
 
- 
+app.listen(PORT,()=>console.log(
+  'Raz Ki Duniya running on '+PORT
+));
