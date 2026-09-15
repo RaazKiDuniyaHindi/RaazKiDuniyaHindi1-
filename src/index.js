@@ -15,7 +15,7 @@ const root =
 
 const app =
   express();
-
+app.use(express.static(root));
 const PORT =
   Number(process.env.PORT || 3000);
 
