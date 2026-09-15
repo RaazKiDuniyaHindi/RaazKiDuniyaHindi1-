@@ -96,7 +96,7 @@ function friendlyRunwayError(error) {
   }
 
   if (lower.includes('promptimage')) {
-    return 'Runway promptImage validation error मिला। यह text-to-video request बिना promptImage के भेजी जा रही है; server ने कोई image field नहीं भेजा।';
+    return 'Runway promptImage validation error मिला। Text-to-video request में image field नहीं भेजी जानी चाहिए।';
   }
 
   if (lower.includes('validation of body')) {
@@ -110,6 +110,15 @@ function friendlyRunwayError(error) {
     return 'Runway API key गलत या expired है। RUNWAYML_API_SECRET जाँचें।';
   }
 
+  if (
+    lower.includes('502') ||
+    lower.includes('bad gateway') ||
+    lower.includes('<!doctype html') ||
+    lower.includes('<html')
+  ) {
+    return 'Runway job-status server ने अस्थायी HTTP 502/HTML response दिया। Server ने retry किया लेकिन request पूरा नहीं हो सका।';
+  }
+
   return raw;
 }
 
@@ -121,6 +130,61 @@ function setJob(id, patch) {
     ...patch,
     updatedAt: Date.now()
   });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/*
+ * Runway status polling को retry करने वाला wrapper.
+ * Temporary 502/Bad Gateway आने पर पूरा job तुरंत fail नहीं होगा.
+ */
+async function waitForRunwayTask(taskRequest, options = {}) {
+  const maxAttempts = options.maxAttempts || 4;
+
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await taskRequest.waitForTaskOutput({
+        timeout: 12 * 60
+      });
+    } catch (error) {
+      lastError = error;
+
+      const raw = errorText(error).toLowerCase();
+
+      const temporary =
+        raw.includes('502') ||
+        raw.includes('bad gateway') ||
+        raw.includes('gateway') ||
+        raw.includes('html') ||
+        raw.includes('<!doctype') ||
+        raw.includes('<html') ||
+        raw.includes('network') ||
+        raw.includes('timeout') ||
+        raw.includes('fetch failed');
+
+      if (!temporary || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      const delay =
+        Math.min(
+          15000,
+          3000 * attempt
+        );
+
+      console.warn(
+        `Runway temporary status error. Retry ${attempt}/${maxAttempts} in ${delay}ms`
+      );
+
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
 }
 
 app.get('/api/status', (req, res) => {
@@ -148,16 +212,16 @@ app.post(
         });
       }
 
-      const script = String(
-        req.body?.script || ''
-      ).trim();
+      const script =
+        String(req.body?.script || '').trim();
 
       const format =
         req.body?.format || '9:16';
 
-      const style = String(
-        req.body?.style || 'Mystery'
-      ).trim();
+      const style =
+        String(
+          req.body?.style || 'Mystery'
+        ).trim();
 
       const characterMode =
         req.body?.characterMode || 'off';
@@ -169,7 +233,8 @@ app.post(
         });
       }
 
-      const scenes = splitScenes(script);
+      const scenes =
+        splitScenes(script);
 
       if (!scenes.length) {
         return res.status(400).json({
@@ -208,6 +273,19 @@ app.post(
               : '720:1280';
 
           for (let i = 0; i < scenes.length; i++) {
+            setJob(id, {
+              status: 'generating',
+              progress:
+                5 +
+                Math.round(
+                  (i / scenes.length) * 85
+                ),
+              completedScenes: i,
+              sceneCount: scenes.length,
+              scenes: [...urls],
+              characterMode
+            });
+
             const prompt =
               `Cinematic Hindi mystery documentary scene. ` +
               `Style: ${style}. ` +
@@ -216,12 +294,11 @@ app.post(
               `${scenes[i]}`;
 
             /*
-             * IMPORTANT:
-             * This is TEXT-TO-VIDEO.
-             * promptImage is intentionally NOT included.
+             * Text-to-video request.
+             * promptImage जानबूझकर नहीं भेजा गया है.
              */
             const taskRequest =
-              client.imageToVideo.create({
+              client.textToVideo.create({
                 model: 'gen4.5',
                 promptText: prompt,
                 ratio,
@@ -229,9 +306,12 @@ app.post(
               });
 
             const task =
-              await taskRequest.waitForTaskOutput({
-                timeout: 12 * 60
-              });
+              await waitForRunwayTask(
+                taskRequest,
+                {
+                  maxAttempts: 4
+                }
+              );
 
             const url =
               task?.output?.[0];
@@ -256,7 +336,10 @@ app.post(
                   ? 'ready'
                   : 'generating',
 
-              progress: pct,
+              progress:
+                i + 1 === scenes.length
+                  ? 100
+                  : pct,
 
               completedScenes:
                 i + 1,
@@ -269,6 +352,7 @@ app.post(
               characterMode
             });
           }
+
         } catch (error) {
           const message =
             friendlyRunwayError(error);
@@ -296,7 +380,8 @@ app.post(
     } catch (error) {
       return res.status(500).json({
         ok: false,
-        error: friendlyRunwayError(error)
+        error:
+          friendlyRunwayError(error)
       });
     }
   }
@@ -314,7 +399,10 @@ app.get('/api/job/:id', (req, res) => {
     });
   }
 
-  res.json({
+  /*
+   * हमेशा JSON response.
+   */
+  res.type('application/json').json({
     ok: true,
     ...job
   });
@@ -327,7 +415,6 @@ app.post(
     { name: 'music', maxCount: 1 }
   ]),
   async (req, res) => {
-
     const job =
       jobs.get(req.body?.jobId);
 
@@ -441,7 +528,8 @@ app.post(
           '_final.mp4'
         );
 
-      const cmd = ffmpeg(out);
+      const cmd =
+        ffmpeg(out);
 
       if (voice) {
         cmd.input(voice);
@@ -452,6 +540,7 @@ app.post(
       }
 
       const filters = [];
+
       let maps = [
         '-map',
         '0:v:0'
