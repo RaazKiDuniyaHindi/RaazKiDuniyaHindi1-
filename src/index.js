@@ -214,6 +214,19 @@ Requirements:
         } catch (error) {
           console.error('GENERATION ERROR:', error);
 
+          // Detailed Runway error logging
+          const runwayDetails =
+            error?.response?.data ||
+            error?.error ||
+            error?.issues ||
+            error?.body ||
+            null;
+
+          console.error(
+            'RUNWAY DETAILS:',
+            JSON.stringify(runwayDetails, null, 2)
+          );
+
           jobs.set(jobId, {
             ...jobs.get(jobId),
             status: 'error',
@@ -485,8 +498,6 @@ app.post(
 app.get('/', (req, res) => {
   res.sendFile(path.join(root, 'index.html'));
 });
-  
-
 
 app.use((error, req, res, next) => {
   console.error('SERVER ERROR:', error);
