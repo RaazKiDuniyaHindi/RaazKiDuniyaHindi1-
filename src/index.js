@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import ffmpeg from 'fluent-ffmpeg';
+import { Client } from '@gradio/client';
 
 const __dirname =
   path.dirname(fileURLToPath(import.meta.url));
@@ -12,7 +13,8 @@ const __dirname =
 const root =
   path.join(__dirname, '..');
 
-const app = express();
+const app =
+  express();
 
 const PORT =
   Number(process.env.PORT || 3000);
@@ -55,17 +57,43 @@ app.use(
   express.static(rendersDir)
 );
 
-const apiKey =
-  process.env.RUNWAYML_API_SECRET?.trim();
+/*
+ * Free Hugging Face ZeroGPU LTX Video Space.
+ *
+ * Runway पूरी तरह हटाया गया है।
+ */
+const LTX_SPACE =
+  process.env.LTX_SPACE ||
+  'Lightricks/ltx-video-distilled';
+
+const HF_TOKEN =
+  process.env.HF_TOKEN?.trim() ||
+  process.env.HUGGINGFACE_TOKEN?.trim() ||
+  '';
 
 const jobs =
   new Map();
 
-const RUNWAY_BASE =
-  'https://api.dev.runwayml.com';
+let ltxClientPromise =
+  null;
 
-const RUNWAY_VERSION =
-  '2024-11-06';
+/*
+ * LTX client एक बार connect होगा
+ * और फिर सभी scenes के लिए reuse होगा।
+ */
+async function getLtxClient() {
+  if (!ltxClientPromise) {
+    ltxClientPromise =
+      Client.connect(
+        LTX_SPACE,
+        HF_TOKEN
+          ? { hf_token: HF_TOKEN }
+          : undefined
+      );
+  }
+
+  return await ltxClientPromise;
+}
 
 function splitScenes(script) {
   const clean =
@@ -104,7 +132,8 @@ function setJob(id, patch) {
 
 function sleep(ms) {
   return new Promise(
-    resolve => setTimeout(resolve, ms)
+    resolve =>
+      setTimeout(resolve, ms)
   );
 }
 
@@ -128,7 +157,7 @@ function errorText(error) {
   }
 }
 
-function friendlyRunwayError(error) {
+function friendlyLtxError(error) {
   const raw =
     errorText(error);
 
@@ -137,48 +166,44 @@ function friendlyRunwayError(error) {
 
   if (
     lower.includes(
-      'not have enough credits'
+      'gpu quota'
     ) ||
     lower.includes(
-      'insufficient'
+      'exceeded your gpu quota'
     ) ||
     lower.includes(
-      'credit'
+      'no gpu is currently available'
+    ) ||
+    lower.includes(
+      'quota'
     )
   ) {
     return (
-      'Runway credits पर्याप्त नहीं हैं। ' +
-      'Credits जोड़ने के बाद ही AI scene generate होगा।'
+      'Free AI GPU अभी उपलब्ध नहीं है या आज की ZeroGPU limit पूरी हो गई है। थोड़ी देर बाद फिर कोशिश करें।'
     );
   }
 
   if (
-    lower.includes('validation of body')
+    lower.includes(
+      'queue'
+    ) ||
+    lower.includes(
+      'timeout'
+    )
   ) {
     return (
-      'Runway request validation failed: ' +
+      'Free AI video queue में बहुत अधिक load है। थोड़ी देर बाद फिर कोशिश करें।'
+    );
+  }
+
+  if (
+    lower.includes(
+      'validation'
+    )
+  ) {
+    return (
+      'LTX AI request validation failed: ' +
       raw
-    );
-  }
-
-  if (
-    lower.includes('401') ||
-    lower.includes('unauthorized')
-  ) {
-    return (
-      'Runway API key गलत या expired है। ' +
-      'RUNWAYML_API_SECRET जाँचें।'
-    );
-  }
-
-  if (
-    lower.includes('502') ||
-    lower.includes('bad gateway') ||
-    lower.includes('<html') ||
-    lower.includes('<!doctype')
-  ) {
-    return (
-      'Runway job-status server ने अस्थायी HTTP 502 response दिया।'
     );
   }
 
@@ -186,307 +211,269 @@ function friendlyRunwayError(error) {
 }
 
 /*
- * Runway API से JSON response लेना.
- *
- * HTML या empty response मिलने पर
- * उसे JSON मानकर parse नहीं करेंगे.
+ * LTX के output को URL में बदलना।
  */
-async function runwayRequest(
+function extractVideoUrl(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    if (
+      value.startsWith('http://') ||
+      value.startsWith('https://')
+    ) {
+      return value;
+    }
+
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found =
+        extractVideoUrl(item);
+
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  if (typeof value === 'object') {
+    const candidates = [
+      value.url,
+      value.path,
+      value.video,
+      value.file,
+      value.name
+    ];
+
+    for (const item of candidates) {
+      const found =
+        extractVideoUrl(item);
+
+      if (found) {
+        return found;
+      }
+    }
+
+    if (value.data) {
+      return extractVideoUrl(
+        value.data
+      );
+    }
+  }
+
+  return null;
+}
+
+/*
+ * URL से MP4 download करके
+ * local renders folder में रखना।
+ */
+async function downloadVideo(
   url,
-  options = {}
+  destination
 ) {
   const response =
-    await fetch(
-      url,
-      {
-        ...options,
-        headers: {
-          Authorization:
-            `Bearer ${apiKey}`,
-
-          'Content-Type':
-            'application/json',
-
-          'X-Runway-Version':
-            RUNWAY_VERSION,
-
-          ...(options.headers || {})
-        }
-      }
-    );
-
-  const text =
-    await response.text();
+    await fetch(url);
 
   if (!response.ok) {
-    const error =
-      new Error(
-        `HTTP ${response.status} — ${text.slice(0, 1000)}`
-      );
-
-    error.status =
-      response.status;
-
-    error.responseText =
-      text;
-
-    throw error;
-  }
-
-  if (!text.trim()) {
     throw new Error(
-      'Runway server ने empty response दिया।'
+      `LTX video download failed: HTTP ${response.status}`
     );
   }
 
-  let data;
+  const buffer =
+    Buffer.from(
+      await response.arrayBuffer()
+    );
 
-  try {
-    data =
-      JSON.parse(text);
-  } catch {
-    const error =
-      new Error(
-        `Runway server ने JSON की जगह HTML/अन्य response भेजा। HTTP ${response.status} — ${text.slice(0, 500)}`
-      );
-
-    error.status =
-      response.status;
-
-    error.responseText =
-      text;
-
-    throw error;
+  if (!buffer.length) {
+    throw new Error(
+      'LTX ने empty video file लौटाई।'
+    );
   }
 
-  return data;
+  fs.writeFileSync(
+    destination,
+    buffer
+  );
+
+  return destination;
 }
 
 /*
- * नया text-to-video task.
+ * LTX Text-to-Video.
  *
- * Official Runway endpoint:
- * POST /v1/text_to_video
+ * Verified endpoint:
+ * /text_to_video
+ *
+ * LTX source के वास्तविक 13 inputs:
+ *
+ * 1 prompt
+ * 2 negative_prompt
+ * 3 image
+ * 4 video
+ * 5 height
+ * 6 width
+ * 7 mode
+ * 8 duration
+ * 9 frames
+ * 10 seed
+ * 11 randomize_seed
+ * 12 guidance_scale
+ * 13 improve_texture
  */
-async function createRunwayTask(
+async function generateLtxVideo(
   prompt,
-  ratio
+  ratio,
+  destination,
+  sceneNumber
 ) {
-  const body = {
-    model: 'gen4.5',
-    promptText: prompt,
-    ratio,
-    duration: 5
-  };
+  const client =
+    await getLtxClient();
+
+  /*
+   * LTX के लिए dimensions 32 के
+   * multiple रखना सुरक्षित है।
+   *
+   * Portrait: 720x1280
+   * Landscape: 1280x720
+   */
+  let height =
+    ratio === '16:9'
+      ? 720
+      : 1280;
+
+  let width =
+    ratio === '16:9'
+      ? 1280
+      : 720;
+
+  /*
+   * Free ZeroGPU quota बचाने के लिए
+   * प्रत्येक scene लगभग 2 सेकंड।
+   *
+   * LTX source में duration 0.3–8.5
+   * seconds स्वीकार करता है।
+   */
+  const duration =
+    2;
+
+  /*
+   * Source code FPS = 30.
+   * LTX internally frames को 8n+1
+   * format में round करता है।
+   */
+  const frames =
+    61;
+
+  const negativePrompt =
+    [
+      'text',
+      'subtitles',
+      'captions',
+      'logo',
+      'watermark',
+      'blurry',
+      'low quality',
+      'deformed',
+      'cartoon',
+      'anime',
+      'static image'
+    ].join(', ');
 
   console.log(
-    'Creating Runway text-to-video task...'
+    `LTX scene ${sceneNumber}: submitting to ZeroGPU...`
   );
 
-  console.log(
-    'Runway request:',
-    JSON.stringify(body)
-  );
-
-  return await runwayRequest(
-    `${RUNWAY_BASE}/v1/text_to_video`,
-    {
-      method: 'POST',
-      body:
-        JSON.stringify(body)
-    }
-  );
-}
-
-/*
- * Existing Runway task का status.
- *
- * 502 / 503 / 504 / network error पर
- * उसी task को retry किया जाएगा.
- *
- * नया task नहीं बनाया जाएगा.
- */
-async function getRunwayTask(
-  taskId
-) {
-  const maxAttempts = 8;
-
-  let attempt = 0;
-
-  while (attempt < maxAttempts) {
-    attempt++;
-
-    try {
-      const task =
-        await runwayRequest(
-          `${RUNWAY_BASE}/v1/tasks/${taskId}`,
-          {
-            method: 'GET',
-            headers: {
-              'Content-Type':
-                'application/json'
-            }
-          }
-        );
-
-      return task;
-
-    } catch (error) {
-      const status =
-        Number(error?.status || 0);
-
-      const raw =
-        errorText(error)
-          .toLowerCase();
-
-      const temporary =
-        status === 502 ||
-        status === 503 ||
-        status === 504 ||
-        raw.includes(
-          'bad gateway'
-        ) ||
-        raw.includes(
-          'gateway'
-        ) ||
-        raw.includes(
-          'network'
-        ) ||
-        raw.includes(
-          'fetch failed'
-        ) ||
-        raw.includes(
-          'timeout'
-        ) ||
-        raw.includes(
-          '<html'
-        ) ||
-        raw.includes(
-          '<!doctype'
-        );
-
-      if (
-        !temporary ||
-        attempt >= maxAttempts
-      ) {
-        throw error;
-      }
-
-      const backoff =
-        Math.min(
-          30000,
-          5000 *
-            Math.pow(
-              2,
-              attempt - 1
-            )
-        );
-
-      const jitter =
-        Math.floor(
-          Math.random() * 2000
-        );
-
-      const wait =
-        backoff + jitter;
-
-      console.warn(
-        `Runway status ${status || 'temporary'} error. Retry ${attempt}/${maxAttempts} in ${wait}ms`
-      );
-
-      await sleep(wait);
-    }
-  }
-
-  throw new Error(
-    'Runway task status check failed after retries.'
-  );
-}
-
-/*
- * Task को पूरा होने तक poll करना.
- */
-async function waitForRunwayTask(
-  taskId
-) {
-  const started =
-    Date.now();
-
-  const timeoutMs =
-    12 * 60 * 1000;
-
-  while (
-    Date.now() - started <
-    timeoutMs
-  ) {
-    const task =
-      await getRunwayTask(
-        taskId
-      );
-
-    const status =
-      String(
-        task?.status || ''
-      ).toUpperCase();
-
-    console.log(
-      `Runway task ${taskId}: ${status}`
+  /*
+   * Text-to-video में image और video
+   * दोनों null रहते हैं।
+   *
+   * mode EXACT:
+   * "text-to-video"
+   */
+  const result =
+    await client.predict(
+      '/text_to_video',
+      [
+        prompt,
+        negativePrompt,
+        null,
+        null,
+        height,
+        width,
+        'text-to-video',
+        duration,
+        frames,
+        -1,
+        true,
+        1,
+        false
+      ]
     );
 
-    if (
-      status === 'SUCCEEDED'
-    ) {
-      return task;
-    }
+  console.log(
+    `LTX scene ${sceneNumber} response received.`
+  );
 
-    if (
-      status === 'FAILED' ||
-      status === 'CANCELED'
-    ) {
-      const error =
-        new Error(
-          task?.failure ||
-          task?.failureCode ||
-          `Runway task ${status}.`
-        );
+  const videoUrl =
+    extractVideoUrl(
+      result?.data
+    );
 
-      error.taskDetails =
-        task;
+  if (!videoUrl) {
+    console.error(
+      'LTX raw response:',
+      JSON.stringify(
+        result,
+        null,
+        2
+      )
+    );
 
-      throw error;
-    }
-
-    /*
-     * Runway recommends 5 seconds or more
-     * between status requests.
-     */
-    const jitter =
-      Math.floor(
-        Math.random() * 1500
-      );
-
-    await sleep(
-      5000 + jitter
+    throw new Error(
+      'LTX ने video URL नहीं लौटाया।'
     );
   }
 
-  throw new Error(
-    'Runway task polling timeout: 12 मिनट में task पूरा नहीं हुआ।'
+  await downloadVideo(
+    videoUrl,
+    destination
   );
+
+  return destination;
 }
 
+/*
+ * Health/status.
+ */
 app.get(
   '/api/status',
-  (req, res) => {
+  async (req, res) => {
     res.json({
       ok: true,
       runwayConfigured:
-        Boolean(apiKey),
-      ffmpeg: true
+        false,
+      ltxConfigured:
+        true,
+      ltxSpace:
+        LTX_SPACE,
+      ffmpeg: true,
+      backend:
+        'Hugging Face ZeroGPU LTX Video'
     });
   }
 );
 
+/*
+ * Generate AI scenes.
+ */
 app.post(
   '/api/generate',
   upload.fields([
@@ -505,14 +492,6 @@ app.post(
   ]),
   async (req, res) => {
     try {
-      if (!apiKey) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            'Runway API key is not configured. Put RUNWAYML_API_SECRET in .env on the server.'
-        });
-      }
-
       const script =
         String(
           req.body?.script || ''
@@ -574,6 +553,9 @@ app.post(
         characterMode
       });
 
+      /*
+       * Browser को तुरंत job ID.
+       */
       res.status(202).json({
         ok: true,
         jobId: id,
@@ -581,23 +563,29 @@ app.post(
           scenes.length
       });
 
+      /*
+       * Background generation.
+       */
       void (async () => {
         const urls = [];
 
         try {
           const ratio =
             format === '16:9'
-              ? '1280:720'
-              : '720:1280';
+              ? '16:9'
+              : '9:16';
 
           for (
             let i = 0;
             i < scenes.length;
             i++
           ) {
-            /*
-             * Scene start.
-             */
+            const sceneFile =
+              path.join(
+                rendersDir,
+                `${id}_${i}.mp4`
+              );
+
             setJob(id, {
               status:
                 'generating',
@@ -605,12 +593,11 @@ app.post(
               progress:
                 Math.max(
                   2,
-                  5 +
-                    Math.round(
-                      (i /
-                        scenes.length) *
-                        85
-                    )
+                  Math.round(
+                    (i /
+                      scenes.length) *
+                      90
+                  )
                 ),
 
               completedScenes:
@@ -625,55 +612,88 @@ app.post(
               characterMode
             });
 
+            /*
+             * प्रत्येक scene को
+             * cinematic prompt में बदलना।
+             */
             const prompt =
-              `Cinematic Hindi mystery documentary scene. ` +
-              `Style: ${style}. ` +
-              `No text, no subtitles, no logos. ` +
-              `Realistic cinematic visuals, natural camera movement, ` +
-              `detailed environment and dramatic lighting. ` +
-              `Visualize this narration naturally: ` +
-              `${scenes[i]}`;
+              [
+                'Cinematic realistic Hindi mystery documentary scene.',
+                `Visual style: ${style}.`,
+                'Photorealistic live-action appearance.',
+                'Natural human/environment movement.',
+                'Cinematic camera movement.',
+                'Detailed realistic lighting.',
+                'No text on screen.',
+                'No subtitles.',
+                'No logos.',
+                'No watermark.',
+                `Scene narration: ${scenes[i]}`
+              ].join(' ');
 
             /*
-             * Direct official text-to-video API.
+             * Temporary network failures पर
+             * पूरा नया job नहीं बनाया जाएगा।
              */
-            const created =
-              await createRunwayTask(
-                prompt,
-                ratio
-              );
+            let lastError =
+              null;
 
-            const taskId =
-              created?.id;
+            const maxAttempts =
+              3;
 
-            if (!taskId) {
-              throw new Error(
-                'Runway ने task ID नहीं दिया।'
-              );
+            for (
+              let attempt = 1;
+              attempt <= maxAttempts;
+              attempt++
+            ) {
+              try {
+                await generateLtxVideo(
+                  prompt,
+                  ratio,
+                  sceneFile,
+                  i + 1
+                );
+
+                lastError =
+                  null;
+
+                break;
+
+              } catch (error) {
+                lastError =
+                  error;
+
+                console.error(
+                  `LTX scene ${i + 1} attempt ${attempt}/${maxAttempts}:`,
+                  error
+                );
+
+                if (
+                  attempt <
+                  maxAttempts
+                ) {
+                  await sleep(
+                    5000 * attempt
+                  );
+                }
+              }
             }
 
-            console.log(
-              `Runway scene ${i + 1}/${scenes.length} task ID: ${taskId}`
+            if (lastError) {
+              throw lastError;
+            }
+
+            /*
+             * Local URL.
+             */
+            const localUrl =
+              `/renders/${path.basename(
+                sceneFile
+              )}`;
+
+            urls.push(
+              localUrl
             );
-
-            /*
-             * अब उसी task को poll करेंगे.
-             */
-            const completed =
-              await waitForRunwayTask(
-                taskId
-              );
-
-            const url =
-              completed?.output?.[0];
-
-            if (!url) {
-              throw new Error(
-                'Runway task succeeded but returned no video URL.'
-              );
-            }
-
-            urls.push(url);
 
             const progress =
               5 +
@@ -712,13 +732,13 @@ app.post(
             });
 
             console.log(
-              `Runway scene ${i + 1}/${scenes.length} completed.`
+              `LTX scene ${i + 1}/${scenes.length} completed.`
             );
           }
 
         } catch (error) {
           const message =
-            friendlyRunwayError(
+            friendlyLtxError(
               error
             );
 
@@ -742,11 +762,11 @@ app.post(
               message,
 
             errorType:
-              'RUNWAY_ERROR'
+              'LTX_ERROR'
           });
 
           console.error(
-            `Runway job ${id} failed:`,
+            `LTX job ${id} failed:`,
             error
           );
         }
@@ -756,7 +776,7 @@ app.post(
       return res.status(500).json({
         ok: false,
         error:
-          friendlyRunwayError(
+          friendlyLtxError(
             error
           )
       });
@@ -764,6 +784,9 @@ app.post(
   }
 );
 
+/*
+ * Job status.
+ */
 app.get(
   '/api/job/:id',
   (req, res) => {
@@ -777,17 +800,15 @@ app.get(
         ok: false,
         status:
           'not_found',
-
         error:
           'Job not found.'
       });
     }
 
-    /*
-     * हमेशा JSON.
-     */
     res
-      .type('application/json')
+      .type(
+        'application/json'
+      )
       .json({
         ok: true,
         ...job
@@ -795,6 +816,12 @@ app.get(
   }
 );
 
+/*
+ * Final render.
+ *
+ * Generated scenes को जोड़ना और
+ * optional uploaded voice/music लगाना।
+ */
 app.post(
   '/api/render',
   upload.fields([
@@ -840,44 +867,44 @@ app.post(
     try {
       const files = [];
 
+      /*
+       * Scene URLs अब local हैं,
+       * इसलिए सीधे files में जाएँगे।
+       */
       for (
         let i = 0;
         i < job.scenes.length;
         i++
       ) {
-        const p =
+        const scenePath =
           path.join(
             rendersDir,
-            `${req.body.jobId}_${i}.mp4`
+            path.basename(
+              job.scenes[i]
+            )
           );
 
-        const r =
-          await fetch(
-            job.scenes[i]
-          );
-
-        if (!r.ok) {
+        if (
+          !fs.existsSync(
+            scenePath
+          )
+        ) {
           throw new Error(
-            `Could not download Runway scene ${i + 1} (${r.status}).`
+            `AI scene ${i + 1} file नहीं मिली।`
           );
         }
 
-        fs.writeFileSync(
-          p,
-          Buffer.from(
-            await r.arrayBuffer()
-          )
+        files.push(
+          scenePath
         );
-
-        files.push(p);
       }
 
       fs.writeFileSync(
         list,
         files
           .map(
-            f =>
-              `file '${f.replaceAll(
+            file =>
+              `file '${file.replaceAll(
                 "'",
                 "'\\''"
               )}'`
@@ -885,6 +912,9 @@ app.post(
           .join('\n')
       );
 
+      /*
+       * सभी scenes जोड़ना।
+       */
       await new Promise(
         (resolve, reject) => {
           ffmpeg()
@@ -917,6 +947,10 @@ app.post(
       const music =
         req.files?.music?.[0]?.path;
 
+      /*
+       * अगर voice/music नहीं है,
+       * तो AI video सीधे वापस।
+       */
       if (
         !voice &&
         !music
@@ -1034,11 +1068,16 @@ app.post(
   }
 );
 
+/*
+ * Global error handler.
+ */
 app.use(
   (err, req, res, next) => {
     console.error(err);
 
-    if (res.headersSent) {
+    if (
+      res.headersSent
+    ) {
       return next(err);
     }
 
@@ -1056,6 +1095,14 @@ app.listen(
   () => {
     console.log(
       `Raz Ki Duniya app: http://localhost:${PORT}`
+    );
+
+    console.log(
+      `AI backend: ${LTX_SPACE}`
+    );
+
+    console.log(
+      'Runway: DISABLED'
     );
   }
 );
