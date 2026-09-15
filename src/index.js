@@ -59,7 +59,10 @@ function cleanFile(file) {
       fs.unlinkSync(file.path);
     }
   } catch (error) {
-    console.error("FILE CLEANUP ERROR:", error?.message || error);
+    console.error(
+      "FILE CLEANUP ERROR:",
+      error?.message || error
+    );
   }
 }
 
@@ -108,7 +111,6 @@ function getRunwayDetails(error) {
   }
 }
 
-
 /* --------------------------------------------------
    HEALTH / STATUS
 -------------------------------------------------- */
@@ -117,10 +119,10 @@ app.get("/api/status", (req, res) => {
   res.status(200).json({
     ok: true,
     server: "Raz Ki Duniya",
-    runwayConfigured: Boolean(client),
+    runwayConfigured: Boolean(runwayKey),
     ffmpeg: true,
     time: new Date().toISOString(),
-    message: client
+    message: runwayKey
       ? "Raz Ki Duniya server ready"
       : "RUNWAYML_API_SECRET is not configured"
   });
@@ -132,7 +134,6 @@ app.get("/api/health", (req, res) => {
     time: new Date().toISOString()
   });
 });
-
 
 /* --------------------------------------------------
    GENERATE
@@ -147,10 +148,11 @@ app.post(
   ]),
   async (req, res) => {
     try {
-      if (!client) {
-        cleanupFiles(
-          Object.values(req.files || {}).flat()
-        );
+      const files =
+        Object.values(req.files || {}).flat();
+
+      if (!runwayKey) {
+        cleanupFiles(files);
 
         return res.status(500).json({
           error:
@@ -158,9 +160,8 @@ app.post(
         });
       }
 
-      const script = String(
-        req.body?.script || ""
-      ).trim();
+      const script =
+        String(req.body?.script || "").trim();
 
       const format =
         req.body?.format || "9:16";
@@ -172,9 +173,7 @@ app.post(
         req.body?.characterMode || "off";
 
       if (!script) {
-        cleanupFiles(
-          Object.values(req.files || {}).flat()
-        );
+        cleanupFiles(files);
 
         return res.status(400).json({
           error: "Script is required."
@@ -184,12 +183,11 @@ app.post(
       const scenes = splitScenes(script);
 
       if (!scenes.length) {
-        cleanupFiles(
-          Object.values(req.files || {}).flat()
-        );
+        cleanupFiles(files);
 
         return res.status(400).json({
-          error: "Script में कोई scene नहीं मिला।"
+          error:
+            "Script में कोई scene नहीं मिला।"
         });
       }
 
@@ -200,6 +198,9 @@ app.post(
           .toString(36)
           .slice(2, 8);
 
+      const characterImage =
+        req.files?.characterImage?.[0] || null;
+
       jobs.set(jobId, {
         status: "generating",
         progress: 2,
@@ -208,14 +209,10 @@ app.post(
         currentScene: 0,
         characterMode,
         createdAt: Date.now(),
-        message: "AI generation शुरू हो रही है…"
+        message:
+          "AI generation शुरू हो रही है…"
       });
 
-      /*
-       * IMPORTANT:
-       * Response तुरंत भेज रहे हैं।
-       * Actual Runway generation background में चलेगी।
-       */
       res.status(200).json({
         ok: true,
         jobId,
@@ -223,13 +220,18 @@ app.post(
       });
 
       /*
-       * Background generation
+       * Text-to-Video:
+       * character image नहीं है
+       *
+       * Image-to-Video:
+       * character image है
        */
       void generateScenes({
         jobId,
         scenes,
         format,
-        style
+        style,
+        characterImage
       });
 
     } catch (error) {
@@ -253,6 +255,59 @@ app.post(
   }
 );
 
+/* --------------------------------------------------
+   RUNWAY API HELPERS
+-------------------------------------------------- */
+
+async function runwayRequest(
+  endpoint,
+  method,
+  body = null
+) {
+  const headers = {
+    Authorization: `Bearer ${runwayKey}`,
+    "X-Runway-Version": "2024-11-06"
+  };
+
+  const options = {
+    method,
+    headers
+  };
+
+  if (body !== null) {
+    headers["Content-Type"] =
+      "application/json";
+
+    options.body =
+      JSON.stringify(body);
+  }
+
+  const response =
+    await fetch(endpoint, options);
+
+  const text =
+    await response.text();
+
+  let data = {};
+
+  try {
+    data = text
+      ? JSON.parse(text)
+      : {};
+  } catch {
+    data = {
+      raw: text
+    };
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Runway API HTTP ${response.status}: ${text}`
+    );
+  }
+
+  return data;
+}
 
 /* --------------------------------------------------
    BACKGROUND RUNWAY GENERATION
@@ -262,7 +317,8 @@ async function generateScenes({
   jobId,
   scenes,
   format,
-  style
+  style,
+  characterImage
 }) {
   try {
     const ratio =
@@ -272,8 +328,46 @@ async function generateScenes({
 
     const generatedVideos = [];
 
-    for (let i = 0; i < scenes.length; i++) {
-      const sceneText = scenes[i];
+    let imageDataUri = null;
+
+    /*
+     * Character image को data URI में बदलना।
+     */
+    if (
+      characterImage?.path &&
+      fs.existsSync(characterImage.path)
+    ) {
+      const imageBuffer =
+        fs.readFileSync(
+          characterImage.path
+        );
+
+      const ext =
+        path.extname(
+          characterImage.originalname || ""
+        ).toLowerCase();
+
+      let mime = "image/jpeg";
+
+      if (ext === ".png") {
+        mime = "image/png";
+      } else if (ext === ".webp") {
+        mime = "image/webp";
+      } else if (ext === ".jpg" || ext === ".jpeg") {
+        mime = "image/jpeg";
+      }
+
+      imageDataUri =
+        `data:${mime};base64,${imageBuffer.toString("base64")}`;
+    }
+
+    for (
+      let i = 0;
+      i < scenes.length;
+      i++
+    ) {
+      const sceneText =
+        scenes[i];
 
       const prompt = `
 Create a cinematic AI video scene for a Hindi mystery storytelling video.
@@ -289,6 +383,7 @@ Requirements:
 - natural camera movement
 - detailed environment
 - visually match the narration
+- maintain visual continuity
 - no subtitles
 - no written text
 - no logos
@@ -296,7 +391,8 @@ Requirements:
 - suitable for YouTube Shorts and social video
 `;
 
-      const oldJob = jobs.get(jobId);
+      const oldJob =
+        jobs.get(jobId);
 
       if (!oldJob) {
         throw new Error(
@@ -322,36 +418,155 @@ Requirements:
         `RUNWAY: Starting scene ${i + 1}/${scenes.length}`
       );
 
-      let task;
+      /*
+       * --------------------------------------------
+       * MODE 1: IMAGE-TO-VIDEO
+       * --------------------------------------------
+       */
 
-      try {
-        task = await client.imageToVideo
-          .create({
-            model: "gen4.5",
-            promptText: prompt,
-            ratio,
-            duration: 5
-          })
-          .waitForTaskOutput();
+      let createData;
 
-      } catch (error) {
-        console.error(
-          `RUNWAY SCENE ${i + 1} ERROR:`,
-          getErrorMessage(error)
+      if (imageDataUri) {
+        console.log(
+          `RUNWAY: Using IMAGE-TO-VIDEO for scene ${i + 1}`
         );
 
-        const details =
-          getRunwayDetails(error);
+        createData =
+          await runwayRequest(
+            "https://api.dev.runwayml.com/v1/image_to_video",
+            "POST",
+            {
+              model: "gen4.5",
+              promptImage: imageDataUri,
+              promptText: prompt,
+              ratio,
+              duration: 5
+            }
+          );
+      }
 
-        if (details) {
-          console.error(
-            "RUNWAY DETAILS:",
-            details
+      /*
+       * --------------------------------------------
+       * MODE 2: TEXT-TO-VIDEO
+       * --------------------------------------------
+       */
+
+      else {
+        console.log(
+          `RUNWAY: Using TEXT-TO-VIDEO for scene ${i + 1}`
+        );
+
+        createData =
+          await runwayRequest(
+            "https://api.dev.runwayml.com/v1/text_to_video",
+            "POST",
+            {
+              model: "gen4.5",
+              promptText: prompt,
+              ratio,
+              duration: 5
+            }
+          );
+      }
+
+      const taskId =
+        createData?.id;
+
+      if (!taskId) {
+        console.error(
+          "RUNWAY CREATE RESPONSE:",
+          JSON.stringify(
+            createData,
+            null,
+            2
+          )
+        );
+
+        throw new Error(
+          `Runway ने scene ${i + 1} के लिए task ID नहीं दी।`
+        );
+      }
+
+      console.log(
+        `RUNWAY: Scene ${i + 1} task created: ${taskId}`
+      );
+
+      /*
+       * --------------------------------------------
+       * TASK POLLING
+       * --------------------------------------------
+       */
+
+      let task = null;
+
+      for (
+        let attempt = 0;
+        attempt < 120;
+        attempt++
+      ) {
+        await new Promise(
+          resolve =>
+            setTimeout(resolve, 5000)
+        );
+
+        task =
+          await runwayRequest(
+            `https://api.dev.runwayml.com/v1/tasks/${taskId}`,
+            "GET"
+          );
+
+        console.log(
+          `RUNWAY: Scene ${i + 1} status: ${
+            task?.status || "unknown"
+          }`
+        );
+
+        if (
+          task?.status === "SUCCEEDED"
+        ) {
+          break;
+        }
+
+        if (
+          task?.status === "FAILED" ||
+          task?.status === "CANCELLED"
+        ) {
+          throw new Error(
+            `Runway scene ${i + 1} generation failed: ${
+              task?.failure ||
+              task?.failureCode ||
+              "Unknown Runway failure"
+            }`
           );
         }
 
+        const current =
+          jobs.get(jobId);
+
+        if (current) {
+          jobs.set(jobId, {
+            ...current,
+            status: "generating",
+            progress: Math.min(
+              74,
+              Math.round(
+                (i / scenes.length) * 75 +
+                ((attempt + 1) / 120) *
+                  (75 / scenes.length)
+              )
+            ),
+            currentScene: i + 1,
+            message:
+              `AI scene ${i + 1} of ${scenes.length} processing…`
+          });
+        }
+      }
+
+      if (
+        task?.status !== "SUCCEEDED"
+      ) {
         throw new Error(
-          `Runway scene ${i + 1} failed: ${getErrorMessage(error)}`
+          `Runway scene ${i + 1} timed out.`
         );
       }
 
@@ -361,7 +576,11 @@ Requirements:
       if (!videoUrl) {
         console.error(
           "RUNWAY TASK OUTPUT:",
-          JSON.stringify(task, null, 2)
+          JSON.stringify(
+            task,
+            null,
+            2
+          )
         );
 
         throw new Error(
@@ -369,9 +588,12 @@ Requirements:
         );
       }
 
-      generatedVideos.push(videoUrl);
+      generatedVideos.push(
+        videoUrl
+      );
 
-      const current = jobs.get(jobId);
+      const current =
+        jobs.get(jobId);
 
       if (!current) {
         throw new Error(
@@ -383,7 +605,8 @@ Requirements:
         ...current,
         status: "generating",
         progress: Math.round(
-          ((i + 1) / scenes.length) * 75
+          ((i + 1) / scenes.length) *
+            75
         ),
         currentScene: i + 1,
         scenes: generatedVideos,
@@ -396,7 +619,15 @@ Requirements:
       );
     }
 
-    const current = jobs.get(jobId);
+    /*
+     * Character image temporary file cleanup
+     */
+    cleanFile(
+      characterImage
+    );
+
+    const current =
+      jobs.get(jobId);
 
     jobs.set(jobId, {
       ...(current || {}),
@@ -429,7 +660,12 @@ Requirements:
       );
     }
 
-    const current = jobs.get(jobId);
+    cleanFile(
+      characterImage
+    );
+
+    const current =
+      jobs.get(jobId);
 
     jobs.set(jobId, {
       ...(current || {}),
@@ -444,41 +680,46 @@ Requirements:
   }
 }
 
-
 /* --------------------------------------------------
    JOB STATUS
 -------------------------------------------------- */
 
-app.get("/api/job/:id", (req, res) => {
-  try {
-    const jobId = req.params.id;
+app.get(
+  "/api/job/:id",
+  (req, res) => {
+    try {
+      const jobId =
+        req.params.id;
 
-    const job = jobs.get(jobId);
+      const job =
+        jobs.get(jobId);
 
-    if (!job) {
-      return res.status(404).json({
-        status: "not_found",
-        error: "Job not found"
+      if (!job) {
+        return res.status(404).json({
+          status: "not_found",
+          error: "Job not found"
+        });
+      }
+
+      return res.status(200).json(
+        job
+      );
+
+    } catch (error) {
+      console.error(
+        "JOB STATUS ERROR:",
+        getErrorMessage(error)
+      );
+
+      return res.status(500).json({
+        status: "error",
+        error:
+          getErrorMessage(error) ||
+          "Job status failed."
       });
     }
-
-    return res.status(200).json(job);
-
-  } catch (error) {
-    console.error(
-      "JOB STATUS ERROR:",
-      getErrorMessage(error)
-    );
-
-    return res.status(500).json({
-      status: "error",
-      error:
-        getErrorMessage(error) ||
-        "Job status failed."
-    });
   }
-});
-
+);
 
 /* --------------------------------------------------
    RENDER
@@ -499,12 +740,17 @@ app.post(
 
     try {
       const jobId =
-        String(req.body?.jobId || "");
+        String(
+          req.body?.jobId || ""
+        );
 
       const job =
         jobs.get(jobId);
 
-      if (!job || job.status !== "ready") {
+      if (
+        !job ||
+        job.status !== "ready"
+      ) {
         cleanupFiles([
           voice,
           music
@@ -516,7 +762,9 @@ app.post(
         });
       }
 
-      if (!job.scenes?.length) {
+      if (
+        !job.scenes?.length
+      ) {
         cleanupFiles([
           voice,
           music
@@ -666,7 +914,10 @@ app.post(
       /*
        * Voice + Music
        */
-      if (voice && music) {
+      if (
+        voice &&
+        music
+      ) {
         await new Promise(
           (resolve, reject) => {
             ffmpeg(outputFile)
@@ -809,20 +1060,21 @@ app.post(
   }
 );
 
-
 /* --------------------------------------------------
    ROOT
 -------------------------------------------------- */
 
-app.get("/", (req, res) => {
-  res.sendFile(
-    path.join(
-      root,
-      "index.html"
-    )
-  );
-});
-
+app.get(
+  "/",
+  (req, res) => {
+    res.sendFile(
+      path.join(
+        root,
+        "index.html"
+      )
+    );
+  }
+);
 
 /* --------------------------------------------------
    EXPRESS ERROR HANDLER
@@ -847,7 +1099,6 @@ app.use(
   }
 );
 
-
 /* --------------------------------------------------
    PROCESS ERROR LOGGING
 -------------------------------------------------- */
@@ -871,7 +1122,6 @@ process.on(
     );
   }
 );
-
 
 /* --------------------------------------------------
    SERVER
