@@ -4,8 +4,8 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { Client } from '@gradio/client';
 import ffmpeg from 'fluent-ffmpeg';
+import RunwayML from '@runwayml/sdk';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +19,9 @@ const upload = multer({
 
 const jobs = new Map();
 
-const SPACE = 'FrameAI4687/Omni-Video-Factory';
-const HF = 'https://frameai4687-omni-video-factory.hf.space';
+const runway = new RunwayML({
+  apiKey: process.env.RUNWAYML_API_SECRET
+});
 
 fs.mkdirSync(path.join(root, 'uploads'), {
   recursive: true
@@ -31,309 +32,198 @@ fs.mkdirSync(path.join(root, 'renders'), {
 });
 
 app.use(express.json());
+
 app.use(express.static(root));
+
 app.use(
   '/renders',
   express.static(path.join(root, 'renders'))
 );
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(root, 'index.html'));
+  res.sendFile(
+    path.join(root, 'index.html')
+  );
 });
 
-let C = null;
 
-async function client() {
-  if (!C) {
-    C = await Client.connect(SPACE);
-  }
+/* =================================
+   IMAGE → DATA URI
+================================= */
 
-  return C;
-}
+function imageToDataUri(file) {
 
-/* ================================
-   FIND OMNI T2V
-================================ */
-
-function findT2V(api) {
-  const all = {
-    ...(api.named_endpoints || {}),
-    ...(api.unnamed_endpoints || {})
-  };
-
-  for (const [name, info] of Object.entries(all)) {
-    const params = info?.parameters || [];
-
-    const labels = params.map(x =>
-      String(
-        x.label ||
-        x.name ||
-        x.parameter_name ||
-        ''
-      ).toLowerCase()
-    );
-
-    const joined = labels.join(' | ');
-
-    const sceneCount = labels.some(x =>
-      x.includes('scene count')
-    );
-
-    const seconds = labels.some(x =>
-      x.includes('seconds')
-    );
-
-    const resolution = labels.some(x =>
-      x.includes('resolution')
-    );
-
-    const aspect = labels.some(x =>
-      x.includes('aspect ratio')
-    );
-
-    const basePrompt = labels.some(x =>
-      x.includes('base prompt')
-    );
-
-    const scene1 = labels.some(x =>
-      x.includes('scene 1') ||
-      x.includes('s1')
-    );
-
-    const hasImageInput =
-      labels.some(x =>
-        x.includes('image file') ||
-        x.includes('input image') ||
-        x === 'image' ||
-        x.includes('start image')
-      );
-
-    console.log(
-      'OMNI ENDPOINT:',
-      name,
-      'PARAMS:',
-      params.length,
-      joined
-    );
-
-    if (
-      params.length === 9 &&
-      sceneCount &&
-      seconds &&
-      resolution &&
-      aspect &&
-      basePrompt &&
-      scene1 &&
-      !hasImageInput
-    ) {
-      console.log(
-        'OMNI T2V FOUND:',
-        name
-      );
-
-      return [name, info];
-    }
-  }
-
-  return null;
-}
-
-/* ================================
-   EXTRACT VIDEO
-================================ */
-
-function getVideo(value, seen = new Set()) {
-  if (!value) {
+  if (!file || !file.path) {
     return null;
   }
 
-  if (typeof value === 'string') {
-    const text = value.trim();
+  const buffer = fs.readFileSync(
+    file.path
+  );
 
-    if (!text) {
-      return null;
-    }
+  const ext =
+    path.extname(file.originalname || '')
+      .toLowerCase();
 
-    if (/^https?:\/\//i.test(text)) {
-      return text;
-    }
+  let mime = 'image/jpeg';
 
-    if (
-      text.startsWith('/gradio_api/file=')
-    ) {
-      return HF + text;
-    }
-
-    if (
-      text.startsWith('/file=')
-    ) {
-      return HF + text;
-    }
-
-    if (
-      /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(text)
-    ) {
-      return (
-        HF +
-        '/gradio_api/file=' +
-        encodeURIComponent(text)
-      );
-    }
-
-    return null;
+  if (ext === '.png') {
+    mime = 'image/png';
+  } else if (ext === '.webp') {
+    mime = 'image/webp';
+  } else if (ext === '.gif') {
+    mime = 'image/gif';
   }
+
+  return (
+    `data:${mime};base64,` +
+    buffer.toString('base64')
+  );
+}
+
+
+/* =================================
+   PROMPT
+================================= */
+
+function buildPrompt(script, style) {
+
+  return [
+    `Create a cinematic ${style || 'Mystery'} video.`,
+    'Realistic visual storytelling.',
+    'Natural character movement.',
+    'Detailed environment.',
+    'Cinematic lighting.',
+    'Smooth camera movement.',
+    'Keep the main subject visually consistent.',
+    'No subtitles.',
+    'No text overlays.',
+    'No logos.',
+    '',
+    'Story:',
+    script
+  ].join('\n');
+}
+
+
+/* =================================
+   RUNWAY GENERATION
+================================= */
+
+async function generateRunwayVideo({
+  script,
+  format,
+  style,
+  characterImage
+}) {
 
   if (
-    typeof value !== 'object' ||
-    seen.has(value)
+    !process.env.RUNWAYML_API_SECRET
   ) {
-    return null;
+    throw new Error(
+      'RUNWAYML_API_SECRET Render Environment में नहीं मिला।'
+    );
   }
 
-  seen.add(value);
+  const ratio =
+    format === '16:9'
+      ? '1280:720'
+      : '720:1280';
 
-  const directKeys = [
-    'url',
-    'video',
-    'path',
-    'file',
-    'data',
-    'value',
-    'output',
-    'outputs',
-    'result'
-  ];
-
-  for (const key of directKeys) {
-    if (!(key in value)) {
-      continue;
-    }
-
-    const found = getVideo(
-      value[key],
-      seen
+  const promptText =
+    buildPrompt(
+      script,
+      style
     );
 
-    if (found) {
-      return found;
-    }
-  }
+  console.log(
+    'RUNWAY REQUEST:',
+    JSON.stringify({
+      model: 'gen4.5',
+      ratio,
+      duration: 5,
+      hasCharacterImage:
+        !!characterImage
+    })
+  );
 
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = getVideo(
-        item,
-        seen
+  const options = {
+    model: 'gen4.5',
+    promptText,
+    ratio,
+    duration: 5
+  };
+
+  if (characterImage) {
+
+    const dataUri =
+      imageToDataUri(
+        characterImage
       );
 
-      if (found) {
-        return found;
-      }
+    if (dataUri) {
+
+      options.promptImage =
+        dataUri;
+
+      console.log(
+        'RUNWAY CHARACTER IMAGE: attached'
+      );
     }
   }
 
-  for (const [key, child] of Object.entries(value)) {
-    if (directKeys.includes(key)) {
-      continue;
-    }
+  console.log(
+    'RUNWAY: creating task...'
+  );
 
-    const found = getVideo(
-      child,
-      seen
+  const task =
+    await runway.imageToVideo
+      .create(options);
+
+  console.log(
+    'RUNWAY TASK ID:',
+    task?.id
+  );
+
+  if (!task?.waitForTaskOutput) {
+    throw new Error(
+      'Runway task response में waitForTaskOutput नहीं मिला।'
     );
-
-    if (found) {
-      return found;
-    }
   }
 
-  return null;
+  const result =
+    await task.waitForTaskOutput({
+      timeout: 10 * 60 * 1000
+    });
+
+  console.log(
+    'RUNWAY RESULT:',
+    JSON.stringify(
+      result
+    ).slice(0, 10000)
+  );
+
+  const videoUrl =
+    result?.output?.[0];
+
+  if (!videoUrl) {
+    throw new Error(
+      'Runway ने video URL नहीं दिया।'
+    );
+  }
+
+  console.log(
+    'RUNWAY VIDEO URL:',
+    videoUrl
+  );
+
+  return videoUrl;
 }
 
-/* ================================
-   BUILD T2V INPUTS
-================================ */
 
-function buildValues(info, body) {
-  const params =
-    info?.parameters || [];
-
-  return params.map(param => {
-    const label = String(
-      param.label ||
-      param.name ||
-      param.parameter_name ||
-      ''
-    ).toLowerCase();
-
-    if (
-      label.includes('scene count')
-    ) {
-      return 1;
-    }
-
-    if (
-      label.includes('seconds per scene')
-    ) {
-      return 3;
-    }
-
-    if (
-      label.includes('resolution')
-    ) {
-      return 384;
-    }
-
-    if (
-      label.includes('aspect ratio')
-    ) {
-      return body.format || '9:16';
-    }
-
-    if (
-      label.includes('base prompt')
-    ) {
-      return (
-        `Cinematic ${body.style || 'Mystery'} ` +
-        `realistic storytelling video`
-      );
-    }
-
-    if (
-      label.includes('scene 1') ||
-      label.startsWith('s1')
-    ) {
-      return body.script;
-    }
-
-    if (
-      label.includes('scene 2') ||
-      label.startsWith('s2')
-    ) {
-      return '';
-    }
-
-    if (
-      label.includes('scene 3') ||
-      label.startsWith('s3')
-    ) {
-      return '';
-    }
-
-    if (
-      label.includes('scene 4') ||
-      label.startsWith('s4')
-    ) {
-      return '';
-    }
-
-    return null;
-  });
-}
-
-/* ================================
+/* =================================
    GENERATE
-================================ */
+================================= */
 
 app.post(
   '/api/generate',
@@ -352,12 +242,14 @@ app.post(
     }
   ]),
   async (req, res) => {
+
     const script =
       req.body?.script?.trim();
 
     if (!script) {
       return res.status(400).json({
-        error: 'Script डालें।'
+        error:
+          'Script डालें।'
       });
     }
 
@@ -367,6 +259,8 @@ app.post(
     jobs.set(id, {
       status: 'generating',
       progress: 5,
+      message:
+        'Runway AI generation शुरू हो रही है…',
       scenes: []
     });
 
@@ -376,134 +270,126 @@ app.post(
     });
 
     try {
-      const c = await client();
 
-      const api =
-        await c.view_api(true);
+      jobs.set(id, {
+        status: 'generating',
+        progress: 10,
+        message:
+          'Runway AI video बना रहा है…',
+        scenes: []
+      });
 
-      const endpoint =
-        findT2V(api);
-
-      if (!endpoint) {
-        throw new Error(
-          'Omni T2V endpoint नहीं मिला।'
-        );
-      }
-
-      const name = endpoint[0];
-      const info = endpoint[1];
-
-      const values =
-        buildValues(
-          info,
-          {
-            script,
-            format:
-              req.body.format || '9:16',
-            style:
-              req.body.style || 'Mystery'
-          }
-        );
-
-      console.log(
-        'OMNI CALL:',
-        name
-      );
-
-      console.log(
-        'OMNI INPUTS:',
-        JSON.stringify(values)
-      );
-
-      const job =
-        c.submit(
-          name,
-          values
-        );
-
-      let result = null;
-
-      for await (const msg of job) {
-        console.log(
-          'OMNI MESSAGE:',
-          JSON.stringify(msg).slice(
-            0,
-            5000
-          )
-        );
-
-        if (
-          msg &&
-          msg.type === 'data'
-        ) {
-          result = msg.data;
-        }
-      }
-
-      console.log(
-        'OMNI FINAL:',
-        JSON.stringify(result).slice(
-          0,
-          10000
-        )
-      );
-
-      const video =
-        getVideo(result);
-
-      if (!video) {
-        throw new Error(
-          'AI ने video output नहीं दिया।'
-        );
-      }
-
-      console.log(
-        'OMNI VIDEO:',
-        video
-      );
+      const videoUrl =
+        await generateRunwayVideo({
+          script,
+          format:
+            req.body?.format || '9:16',
+          style:
+            req.body?.style || 'Mystery',
+          characterImage:
+            req.files?.characterImage?.[0] ||
+            null
+        });
 
       jobs.set(id, {
         status: 'ready',
         progress: 100,
-        scenes: [video]
+        message:
+          'AI video तैयार है।',
+        scenes: [
+          videoUrl
+        ]
       });
 
+      console.log(
+        'JOB READY:',
+        id
+      );
+
     } catch (error) {
+
       console.error(
-        'OMNI ERROR:',
+        'RUNWAY ERROR:',
         error
       );
+
+      const message =
+        error?.message ||
+        String(error);
 
       jobs.set(id, {
         status: 'error',
         progress: 0,
+        message:
+          'AI generation failed.',
         scenes: [],
-        error:
-          error?.message ||
-          String(error)
+        error: message
       });
+
     }
   }
 );
 
-/* ================================
+
+/* =================================
    JOB STATUS
-================================ */
+================================= */
 
 app.get(
   '/api/job/:id',
   (req, res) => {
+
     res.json(
-      jobs.get(req.params.id) || {
+      jobs.get(
+        req.params.id
+      ) || {
         status: 'not_found'
       }
     );
   }
 );
 
-/* ================================
+
+/* =================================
+   DOWNLOAD RUNWAY VIDEO
+================================= */
+
+async function downloadVideo(
+  url,
+  output
+) {
+
+  console.log(
+    'DOWNLOADING RUNWAY VIDEO...'
+  );
+
+  const response =
+    await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `AI video download failed: HTTP ${response.status}`
+    );
+  }
+
+  const arrayBuffer =
+    await response.arrayBuffer();
+
+  fs.writeFileSync(
+    output,
+    Buffer.from(arrayBuffer)
+  );
+
+  console.log(
+    'RUNWAY VIDEO SAVED:',
+    output
+  );
+}
+
+
+/* =================================
    RENDER
-================================ */
+================================= */
 
 app.post(
   '/api/render',
@@ -518,8 +404,11 @@ app.post(
     }
   ]),
   async (req, res) => {
+
     const job =
-      jobs.get(req.body.jobId);
+      jobs.get(
+        req.body.jobId
+      );
 
     if (
       !job ||
@@ -531,6 +420,16 @@ app.post(
       });
     }
 
+    if (
+      !job.scenes ||
+      !job.scenes[0]
+    ) {
+      return res.status(400).json({
+        error:
+          'AI video URL उपलब्ध नहीं है।'
+      });
+    }
+
     const output =
       path.join(
         root,
@@ -539,22 +438,10 @@ app.post(
       );
 
     try {
-      const response =
-        await fetch(
-          job.scenes[0]
-        );
 
-      if (!response.ok) {
-        throw new Error(
-          `AI video download failed: HTTP ${response.status}`
-        );
-      }
-
-      fs.writeFileSync(
-        output,
-        Buffer.from(
-          await response.arrayBuffer()
-        )
+      await downloadVideo(
+        job.scenes[0],
+        output
       );
 
       const voice =
@@ -563,7 +450,11 @@ app.post(
       const music =
         req.files?.music?.[0]?.path;
 
+      /*
+       * No audio
+       */
       if (!voice && !music) {
+
         return res.json({
           video:
             '/renders/' +
@@ -593,7 +484,11 @@ app.post(
         '0:v:0'
       ];
 
+      /*
+       * Voice + music
+       */
       if (voice && music) {
+
         options.push(
           '-filter_complex',
           '[1:a]volume=1[a];' +
@@ -602,7 +497,14 @@ app.post(
           '-map',
           '[aout]'
         );
-      } else {
+
+      }
+
+      /*
+       * Voice OR music
+       */
+      else {
+
         options.push(
           '-map',
           '1:a:0'
@@ -614,26 +516,40 @@ app.post(
         'libx264',
         '-c:a',
         'aac',
-        '-shortest'
+        '-shortest',
+        '-movflags',
+        '+faststart'
       );
 
       await new Promise(
         (resolve, reject) => {
+
           command
-            .outputOptions(options)
+            .outputOptions(
+              options
+            )
             .save(finalOutput)
-            .on('end', resolve)
-            .on('error', reject);
+            .on(
+              'end',
+              resolve
+            )
+            .on(
+              'error',
+              reject
+            );
         }
       );
 
       res.json({
         video:
           '/renders/' +
-          path.basename(finalOutput)
+          path.basename(
+            finalOutput
+          )
       });
 
     } catch (error) {
+
       console.error(
         'RENDER ERROR:',
         error
@@ -648,9 +564,10 @@ app.post(
   }
 );
 
-/* ================================
+
+/* =================================
    START
-================================ */
+================================= */
 
 const PORT =
   Number(
@@ -660,8 +577,16 @@ const PORT =
 app.listen(
   PORT,
   () => {
+
     console.log(
       `Raz Ki Duniya started on port ${PORT}`
+    );
+
+    console.log(
+      'Runway API:',
+      process.env.RUNWAYML_API_SECRET
+        ? 'configured'
+        : 'MISSING'
     );
   }
 );
