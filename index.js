@@ -9,6 +9,7 @@ import ffmpegPath from "ffmpeg-static";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
+
 const publicDir = path.join(root, "public");
 const uploadsDir = path.join(root, "uploads");
 const rendersDir = path.join(root, "renders");
@@ -18,7 +19,9 @@ for (const dir of [uploadsDir, rendersDir, jobsDir]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-if (ffmpegPath) ffmpeg.setFfmpegPath(ffmpegPath);
+if (ffmpegPath) {
+  ffmpeg.setFfmpegPath(ffmpegPath);
+}
 
 const app = express();
 const PORT = Number(process.env.PORT || 10000);
@@ -122,11 +125,11 @@ function splitScenes(script) {
       scenes.push(piece);
     } else {
       for (let i = 0; i < piece.length; i += 400) {
-        const part = piece
-          .slice(i, i + 400)
-          .trim();
+        const part = piece.slice(i, i + 400).trim();
 
-        if (part) scenes.push(part);
+        if (part) {
+          scenes.push(part);
+        }
       }
     }
   }
@@ -184,9 +187,7 @@ async function runwayCreate(prompt, ratio) {
   }
 
   if (!data?.id) {
-    throw new Error(
-      "Runway ने task ID नहीं दिया।"
-    );
+    throw new Error("Runway ने task ID नहीं दिया।");
   }
 
   return data.id;
@@ -269,9 +270,7 @@ async function waitForTask(
       currentTaskId: taskId
     });
 
-    await new Promise(r =>
-      setTimeout(r, 5000)
-    );
+    await new Promise(r => setTimeout(r, 5000));
   }
 
   throw new Error(
@@ -296,15 +295,12 @@ async function generateScenes(id) {
         ? "1280:720"
         : "720:1280";
 
-    const urls =
-      Array.isArray(job.scenes)
-        ? [...job.scenes]
-        : [];
-
-    const start = urls.length;
+    const urls = Array.isArray(job.scenes)
+      ? [...job.scenes]
+      : [];
 
     for (
-      let i = start;
+      let i = urls.length;
       i < scenes.length;
       i++
     ) {
@@ -318,9 +314,7 @@ async function generateScenes(id) {
         status: "generating",
         progress: Math.max(
           2,
-          Math.round(
-            (i / scenes.length) * 75
-          )
+          Math.round((i / scenes.length) * 75)
         ),
         sceneIndex: i + 1,
         sceneCount: scenes.length,
@@ -329,18 +323,22 @@ async function generateScenes(id) {
         error: null
       });
 
-      let taskId =
-        job.currentTaskId &&
-        i === Number(job.currentSceneIndex)
-          ? job.currentTaskId
-          : null;
+      let taskId = null;
+
+      const currentJob = jobs.get(id);
+
+      if (
+        currentJob?.currentTaskId &&
+        i === Number(currentJob.currentSceneIndex)
+      ) {
+        taskId = currentJob.currentTaskId;
+      }
 
       if (!taskId) {
-        taskId =
-          await runwayCreate(
-            prompt,
-            ratio
-          );
+        taskId = await runwayCreate(
+          prompt,
+          ratio
+        );
 
         setJob(id, {
           currentTaskId: taskId,
@@ -348,18 +346,16 @@ async function generateScenes(id) {
         });
       }
 
-      const task =
-        await waitForTask(
-          id,
-          taskId,
-          i + 1,
-          scenes.length
-        );
+      const task = await waitForTask(
+        id,
+        taskId,
+        i + 1,
+        scenes.length
+      );
 
-      const url =
-        Array.isArray(task.output)
-          ? task.output[0]
-          : task.output;
+      const url = Array.isArray(task.output)
+        ? task.output[0]
+        : task.output;
 
       if (
         typeof url !== "string" ||
@@ -377,13 +373,11 @@ async function generateScenes(id) {
         progress: Math.min(
           75,
           Math.round(
-            ((i + 1) /
-              scenes.length) *
-              75
+            ((i + 1) / scenes.length) * 75
           )
         ),
         sceneIndex: i + 1,
-        scenes: urls,
+        scenes: [...urls],
         currentTaskId: null,
         currentSceneIndex: null,
         message:
@@ -391,10 +385,16 @@ async function generateScenes(id) {
       });
     }
 
+    if (!urls.length) {
+      throw new Error(
+        "AI ने कोई scene video तैयार नहीं किया।"
+      );
+    }
+
     setJob(id, {
       status: "ready",
       progress: 75,
-      scenes: urls,
+      scenes: [...urls],
       currentTaskId: null,
       currentSceneIndex: null,
       message:
@@ -418,10 +418,8 @@ async function generateScenes(id) {
 app.get("/api/status", (_req, res) => {
   res.json({
     ok: true,
-    runwayConfigured:
-      Boolean(runwayKey),
-    ffmpegConfigured:
-      Boolean(ffmpegPath)
+    runwayConfigured: Boolean(runwayKey),
+    ffmpegConfigured: Boolean(ffmpegPath)
   });
 });
 
@@ -447,20 +445,17 @@ app.post(
         );
       }
 
-      const script =
-        String(
-          req.body.script || ""
-        ).trim();
+      const script = String(
+        req.body.script || ""
+      ).trim();
 
-      const format =
-        String(
-          req.body.format || "9:16"
-        );
+      const format = String(
+        req.body.format || "9:16"
+      );
 
-      const style =
-        String(
-          req.body.style || "Mystery"
-        );
+      const style = String(
+        req.body.style || "Mystery"
+      );
 
       if (!script) {
         return publicError(
@@ -470,8 +465,7 @@ app.post(
         );
       }
 
-      const scenes =
-        splitScenes(script);
+      const scenes = splitScenes(script);
 
       if (!scenes.length) {
         return publicError(
@@ -487,12 +481,10 @@ app.post(
           .slice(2, 8)}`;
 
       const voice =
-        req.files?.voice?.[0]?.path ||
-        null;
+        req.files?.voice?.[0]?.path || null;
 
       const music =
-        req.files?.music?.[0]?.path ||
-        null;
+        req.files?.music?.[0]?.path || null;
 
       setJob(id, {
         id,
@@ -535,8 +527,7 @@ app.post(
 app.get(
   "/api/job/:id",
   (req, res) => {
-    const job =
-      jobs.get(req.params.id);
+    const job = jobs.get(req.params.id);
 
     if (!job) {
       return res.status(404).json({
@@ -554,8 +545,7 @@ async function downloadFile(
   url,
   outPath
 ) {
-  const response =
-    await fetch(url);
+  const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(
@@ -563,40 +553,65 @@ async function downloadFile(
     );
   }
 
+  const buffer = Buffer.from(
+    await response.arrayBuffer()
+  );
+
+  if (!buffer.length) {
+    throw new Error(
+      "Generated scene खाली है।"
+    );
+  }
+
   fs.writeFileSync(
     outPath,
-    Buffer.from(
-      await response.arrayBuffer()
-    )
+    buffer
   );
 }
 
 function ffmpegRun(command) {
   return new Promise(
-    (resolve, reject) =>
+    (resolve, reject) => {
       command
         .on("end", resolve)
         .on("error", reject)
-        .run()
+        .run();
+    }
   );
 }
 
 async function renderJob(jobId) {
-  const job =
-    jobs.get(jobId);
+  const job = jobs.get(jobId);
 
-  if (
-    !job ||
-    job.status !== "ready"
-  ) {
+  if (!job) {
     throw new Error(
-      "AI scenes are not ready yet."
+      "Job नहीं मिला।"
+    );
+  }
+
+  if (job.status !== "ready") {
+    throw new Error(
+      `AI scenes अभी ready नहीं हैं। Current status: ${job.status}`
     );
   }
 
   if (!ffmpegPath) {
     throw new Error(
       "FFmpeg उपलब्ध नहीं है।"
+    );
+  }
+
+  /*
+   * सबसे महत्वपूर्ण FIX:
+   * पुराने/stale job में scenes [] हो सकते हैं।
+   * ऐसे job को FFmpeg तक जाने नहीं देंगे।
+   */
+  if (
+    !Array.isArray(job.scenes) ||
+    job.scenes.length === 0
+  ) {
+    throw new Error(
+      "इस job में कोई AI scene video नहीं है। कृपया नया Generate करें।"
     );
   }
 
@@ -614,16 +629,40 @@ async function renderJob(jobId) {
     i < job.scenes.length;
     i++
   ) {
-    const p =
-      path.join(
-        rendersDir,
-        `${jobId}_${i}.mp4`
+    const sceneUrl = job.scenes[i];
+
+    if (
+      typeof sceneUrl !== "string" ||
+      !sceneUrl
+    ) {
+      throw new Error(
+        `Scene ${i + 1} का video URL खाली है।`
       );
+    }
+
+    const p = path.join(
+      rendersDir,
+      `${jobId}_${i}.mp4`
+    );
 
     if (!fs.existsSync(p)) {
       await downloadFile(
-        job.scenes[i],
+        sceneUrl,
         p
+      );
+    }
+
+    if (!fs.existsSync(p)) {
+      throw new Error(
+        `Scene ${i + 1} download नहीं हुई।`
+      );
+    }
+
+    const stat = fs.statSync(p);
+
+    if (stat.size === 0) {
+      throw new Error(
+        `Scene ${i + 1} की video file खाली है।`
       );
     }
 
@@ -638,64 +677,94 @@ async function renderJob(jobId) {
             8
         ),
       message:
-        `Scene ${i + 1} जोड़ रहा हूँ…`
+        `Scene ${i + 1} download हो गई।`
     });
   }
 
-  const joined =
-    path.join(
-      rendersDir,
-      `${jobId}_joined.mp4`
-    );
-
   /*
-   * FIX:
-   * पुराने code में `${jobId}.txt` को FFmpeg input
-   * दिया जा रहा था।
-   *
-   * अब .txt concat file इस्तेमाल नहीं हो रही।
-   * सीधे असली MP4 files को concat किया जा रहा है।
+   * दूसरा महत्वपूर्ण FIX:
+   * FFmpeg को कभी भी n=0 नहीं दिया जाएगा।
    */
+
+  if (sceneFiles.length === 0) {
+    throw new Error(
+      "कोई scene file उपलब्ध नहीं है।"
+    );
+  }
+
+  const joined = path.join(
+    rendersDir,
+    `${jobId}_joined.mp4`
+  );
+
   if (!fs.existsSync(joined)) {
-    const joinCommand =
-      ffmpeg();
 
-    for (
-      const sceneFile of sceneFiles
-    ) {
-      joinCommand.input(
-        sceneFile
+    /*
+     * केवल 1 scene है तो concat filter की जरूरत नहीं।
+     */
+    if (sceneFiles.length === 1) {
+
+      await ffmpegRun(
+        ffmpeg(sceneFiles[0])
+          .outputOptions([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart"
+          ])
+          .output(joined)
       );
-    }
 
-    const inputs =
-      sceneFiles
+    } else {
+
+      /*
+       * 2 या उससे अधिक scenes:
+       * अब n हमेशा 2,3,4... होगा।
+       */
+      const joinCommand = ffmpeg();
+
+      for (const sceneFile of sceneFiles) {
+        joinCommand.input(sceneFile);
+      }
+
+      const inputs = sceneFiles
         .map(
           (_, i) =>
             `[${i}:v:0]`
         )
         .join("");
 
-    const filter =
-      `${inputs}concat=n=${sceneFiles.length}:v=1:a=0[v]`;
+      const filter =
+        `${inputs}concat=n=${sceneFiles.length}:v=1:a=0[v]`;
 
-    await ffmpegRun(
-      joinCommand
-        .complexFilter(filter)
-        .outputOptions([
-          "-map",
-          "[v]",
-          "-an",
-          "-c:v",
-          "libx264",
-          "-preset",
-          "veryfast",
-          "-pix_fmt",
-          "yuv420p",
-          "-movflags",
-          "+faststart"
-        ])
-        .output(joined)
+      await ffmpegRun(
+        joinCommand
+          .complexFilter(filter)
+          .outputOptions([
+            "-map",
+            "[v]",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart"
+          ])
+          .output(joined)
+      );
+    }
+  }
+
+  if (!fs.existsSync(joined)) {
+    throw new Error(
+      "Scenes जोड़ने के बाद joined video नहीं बनी।"
     );
   }
 
@@ -711,15 +780,13 @@ async function renderJob(jobId) {
       ? job.music
       : null;
 
-  const final =
-    path.join(
-      rendersDir,
-      `${jobId}_final.mp4`
-    );
+  const final = path.join(
+    rendersDir,
+    `${jobId}_final.mp4`
+  );
 
   if (voice || music) {
-    const cmd =
-      ffmpeg(joined);
+    const cmd = ffmpeg(joined);
 
     const maps = [
       "-map",
@@ -743,14 +810,18 @@ async function renderJob(jobId) {
         "-map",
         "[aout]"
       );
+
     } else if (voice) {
+
       cmd.input(voice);
 
       maps.push(
         "-map",
         "1:a:0"
       );
+
     } else {
+
       cmd.input(music);
 
       maps.push(
@@ -784,12 +855,18 @@ async function renderJob(jobId) {
         )
         .output(final)
     );
-  } else if (
-    !fs.existsSync(final)
-  ) {
+
+  } else if (!fs.existsSync(final)) {
+
     fs.copyFileSync(
       joined,
       final
+    );
+  }
+
+  if (!fs.existsSync(final)) {
+    throw new Error(
+      "Final video नहीं बनी।"
     );
   }
 
@@ -820,13 +897,12 @@ app.post(
     }
   ]),
   async (req, res) => {
-    const jobId =
-      String(
-        req.body.jobId || ""
-      );
 
-    const job =
-      jobs.get(jobId);
+    const jobId = String(
+      req.body.jobId || ""
+    );
+
+    const job = jobs.get(jobId);
 
     if (!job) {
       return publicError(
@@ -837,6 +913,7 @@ app.post(
     }
 
     try {
+
       if (
         req.files?.voice?.[0]?.path ||
         req.files?.music?.[0]?.path
@@ -846,6 +923,7 @@ app.post(
             req.files?.voice?.[0]?.path ||
             job.voice ||
             null,
+
           music:
             req.files?.music?.[0]?.path ||
             job.music ||
@@ -853,21 +931,46 @@ app.post(
         });
       }
 
-      const fresh =
-        jobs.get(jobId);
+      const fresh = jobs.get(jobId);
+
+      /*
+       * Render तभी होगा जब scenes मौजूद हों।
+       */
+      if (
+        fresh.status !== "ready" &&
+        !(fresh.status === "done" && fresh.video)
+      ) {
+        return publicError(
+          res,
+          400,
+          `AI scenes अभी तैयार नहीं हैं। Status: ${fresh.status}`
+        );
+      }
+
+      if (
+        fresh.status === "ready" &&
+        (!Array.isArray(fresh.scenes) ||
+          fresh.scenes.length === 0)
+      ) {
+        return publicError(
+          res,
+          400,
+          "AI scenes नहीं मिलीं। नया Generate करें।"
+        );
+      }
 
       const video =
         fresh.status === "done" &&
         fresh.video
           ? fresh.video
-          : await renderJob(
-              jobId
-            );
+          : await renderJob(jobId);
 
       res.json({
         video
       });
+
     } catch (error) {
+
       console.error(
         "RENDER ERROR:",
         error
@@ -891,11 +994,11 @@ app.post(
 app.get(
   "/{*splat}",
   (_req, res) => {
-    const index =
-      path.join(
-        publicDir,
-        "index.html"
-      );
+
+    const index = path.join(
+      publicDir,
+      "index.html"
+    );
 
     if (!fs.existsSync(index)) {
       return res
@@ -911,9 +1014,8 @@ app.get(
 
 loadJobs();
 
-for (
-  const [id, job] of jobs
-) {
+for (const [id, job] of jobs) {
+
   if (
     job.status === "generating" &&
     job.currentTaskId
