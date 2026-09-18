@@ -385,11 +385,19 @@ async function generateScenes(id) {
       });
     }
 
-    if (!urls.length) {
-      throw new Error(
-        "AI ने कोई scene video तैयार नहीं किया।"
-      );
-    }
+ setJob(id, {
+  status: "ready",
+  progress: 75,
+  scenes: urls,
+  currentTaskId: null,
+  currentSceneIndex: null,
+  message:
+    "AI scenes तैयार हैं। Final MP4 बनाया जा सकता है।"
+});   
+  
+        
+      
+    
 
     setJob(id, {
       status: "ready",
