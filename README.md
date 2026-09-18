@@ -1,6 +1,6 @@
 # Raz Ki Duniya — FIXED v2
 
-यह package उस समस्या को ठीक करता है जिसमें `AI scenes: 0%` पर UI अटका रहता था।
+यह package Raz Ki Duniya video maker के current flow को साफ और stable रखता है।
 
 ## क्या ठीक किया गया
 - Frontend अब सच में `POST /api/generate` को FormData के साथ call करता है।
@@ -9,7 +9,10 @@
 - Error अब स्क्रीन पर साफ दिखाई देगा।
 - AI scenes ready होने के बाद `/api/render` call होता है।
 - FFmpeg के लिए `ffmpeg-static` जोड़ा गया है।
-- Runway Gen-4.5 text-to-video backend रखा गया है।
+- Runway Gen-4.5 का documented text-to-video mode इस्तेमाल किया गया है; इसमें `promptImage` की जरूरत नहीं है।
+- Express 5 का catch-all route सही syntax पर किया गया है।
+- बहुत लंबे scene prompts को API सीमा से पहले छोटा किया गया है।
+- इस्तेमाल न होने वाला Talking Character upload field हटाया गया है।
 
 ## Render पर सेटअप
 1. GitHub में इस ZIP की files upload करें और पुरानी project files replace करें।
