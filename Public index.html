@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Raz Ki Duniya — Complete AI Video Maker</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#09090f;color:#f5f5f7;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+.app{max-width:760px;margin:0 auto;padding:28px 18px 50px}
+h1{font-size:34px;line-height:1.15;margin:0 0 10px}
+.sub{color:#aaa;line-height:1.5;margin-bottom:24px}
+.card{background:#14141e;border:1px solid #2b2b38;border-radius:18px;padding:16px;margin:14px 0}
+label{display:block;font-size:17px;margin-bottom:9px}
+textarea,select,input[type=file]{width:100%;background:#0e0e15;color:#fff;border:1px solid #3b3b49;border-radius:14px;padding:13px;font-size:16px}
+textarea{min-height:230px;resize:vertical}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.hint{color:#aaa;font-size:13px;line-height:1.5;margin-top:8px}
+button{width:100%;border:0;border-radius:14px;padding:15px;font-size:17px;font-weight:800;cursor:pointer;margin-top:12px}
+.primary{background:#7b35e8;color:white}
+.secondary{background:#292936;color:white}
+button:disabled{opacity:.55}
+.progressWrap{margin-top:14px}
+.progress{height:10px;background:#292936;border-radius:10px;overflow:hidden}
+.bar{height:100%;width:0;background:#9b5cff;transition:width .35s}
+.statusLine{display:flex;justify-content:space-between;gap:10px;margin:9px 0;color:#ddd}
+#error{color:#ff9c9c;white-space:pre-wrap}
+#result{display:none}
+video{width:100%;border-radius:14px;background:#000;margin-top:12px}
+.scene{border-bottom:1px solid #2b2b38;padding:11px 0}
+.scene:last-child{border-bottom:0}
+.small{color:#aaa;font-size:12px;margin-top:4px}
+.badge{display:inline-block;padding:6px 9px;border-radius:8px;background:#28283a;color:#ddd;font-size:12px}
+@media(max-width:600px){.row{grid-template-columns:1fr}h1{font-size:30px}.app{padding-top:22px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>🔎 Raz Ki Duniya — Complete AI Video Maker</h1>
+  <div class="sub">Script → AI visuals → आपकी आवाज़/music → MP4</div>
+
+  <div class="card">
+    <label for="script">Hindi Script</label>
+    <textarea id="script" placeholder="अपनी Hindi script यहाँ डालें..."></textarea>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <label for="format">Format</label>
+      <select id="format">
+        <option value="9:16">9:16 Shorts/Reels</option>
+        <option value="16:9">16:9 YouTube</option>
+      </select>
+    </div>
+    <div class="card">
+      <label for="style">Style</label>
+      <select id="style">
+        <option>Mystery</option>
+        <option>Horror</option>
+        <option>Historical</option>
+        <option>Space</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>🎙️ आपकी Voice</label>
+    <input id="voice" type="file" accept="audio/*">
+    <div class="hint" id="voiceName">कोई voice file नहीं चुनी गई</div>
+  </div>
+
+  <div class="card">
+    <label>🎵 Background Music (optional)</label>
+    <input id="music" type="file" accept="audio/*">
+    <div class="hint" id="musicName">कोई music file नहीं चुनी गई</div>
+  </div>
+
+>
+
+  <button class="primary" id="generate">🚀 AI VIDEO बनाओ</button>
+
+  <div class="card" id="statusCard">
+    <div class="statusLine">
+      <span id="statusText">AI scenes: 0%</span>
+      <b id="pct">0%</b>
+    </div>
+    <div class="progress"><div class="bar" id="bar"></div></div>
+    <div class="hint" id="message">Button दबाने के बाद server से AI generation शुरू होगी।</div>
+    <div id="error"></div>
+  </div>
+
+  <div class="card" id="result">
+    <span class="badge">VIDEO READY</span>
+    <video id="video" controls playsinline></video>
+    <a id="videoLink" href="#" target="_blank" style="display:block;text-align:center;margin-top:12px;color:#c9a8ff">▶ वीडियो खोलें</a>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentJobId = null;
+
+function setProgress(value, msg) {
+  value = Math.max(0, Math.min(100, Number(value) || 0));
+  $("bar").style.width = value + "%";
+  $("pct").textContent = value + "%";
+  $("statusText").textContent = "AI scenes: " + value + "%";
+  if (msg) $("message").textContent = msg;
+}
+
+function fileName(inputId, labelId) {
+  $(inputId).addEventListener("change", () => {
+    $(labelId).textContent = $(inputId).files[0]
+      ? $(inputId).files[0].name
+      : "कोई file नहीं चुनी गई";
+  });
+}
+fileName("voice","voiceName");
+fileName("music","musicName");
+
+async function pollJob(jobId) {
+  for (;;) {
+    const r = await fetch("/api/job/" + encodeURIComponent(jobId), {cache:"no-store"});
+    const job = await r.json();
+
+    if (job.status === "error") throw new Error(job.error || "AI generation failed.");
+    setProgress(job.progress, job.message || "AI scenes बन रहे हैं…");
+
+    if (job.status === "ready") {
+      setProgress(76, "AI scenes तैयार हैं। Final MP4 बनाया जा रहा है…");
+      return job;
+    }
+    if (job.status === "done") return job;
+
+    await new Promise(resolve => setTimeout(resolve, 2500));
+  }
+}
+
+$("generate").onclick = async () => {
+  $("error").textContent = "";
+  $("result").style.display = "none";
+
+  const script = $("script").value.trim();
+  if (!script) {
+    $("error").textContent = "पहले script डालें।";
+    return;
+  }
+
+  const btn = $("generate");
+  btn.disabled = true;
+  setProgress(1, "Server को request भेजी जा रही है…");
+
+  try {
+    const fd = new FormData();
+    fd.append("script", script);
+    fd.append("format", $("format").value);
+    fd.append("style", $("style").value);
+
+    if ($("voice").files[0]) fd.append("voice", $("voice").files[0]);
+    if ($("music").files[0]) fd.append("music", $("music").files[0]);
+
+    const response = await fetch("/api/generate", {method:"POST", body:fd});
+    const data = await response.json();
+
+    if (!response.ok) throw new Error(data.error || "Generate request failed.");
+    currentJobId = data.jobId;
+
+    setProgress(2, `${data.sceneCount} AI scenes के लिए generation शुरू हो गई है…`);
+    const job = await pollJob(currentJobId);
+
+    const renderFd = new FormData();
+    renderFd.append("jobId", currentJobId);
+    if ($("voice").files[0]) renderFd.append("voice", $("voice").files[0]);
+    if ($("music").files[0]) renderFd.append("music", $("music").files[0]);
+
+    setProgress(80, "Final MP4 render हो रहा है…");
+    const renderResponse = await fetch("/api/render", {method:"POST", body:renderFd});
+    const renderData = await renderResponse.json();
+
+    if (!renderResponse.ok) throw new Error(renderData.error || "Render failed.");
+
+    setProgress(100, "वीडियो तैयार है!");
+    $("video").src = renderData.video;
+    $("videoLink").href = renderData.video;
+    $("result").style.display = "block";
+    $("result").scrollIntoView({behavior:"smooth"});
+  } catch (e) {
+    $("error").textContent = "❌ " + (e.message || e);
+    setProgress(0, "Generation रुक गई।");
+  } finally {
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
